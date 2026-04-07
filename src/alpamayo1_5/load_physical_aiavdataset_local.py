@@ -19,7 +19,7 @@ import physical_ai_av.egomotion as egomotion_module
 
 def load_physical_aiavdataset_local(
     clip_id: str,
-    data_dir: str = "/home/datasets/PhysicalAI-Autonomous-Vehicles-base",
+    data_dir: str = "/home/xingao/code/Alpamayo1.5/data/PhysicalAI-Autonomous-Vehicles",
     t0_us: int = 5_100_000,
     num_history_steps: int = 16,
     num_future_steps: int = 64,

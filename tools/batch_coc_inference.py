@@ -12,7 +12,7 @@ Usage:
 """
 import os
 os.chdir('/home/xingao/code/Alpamayo1.5')
-os.environ['CUDA_VISIBLE_DEVICES'] = "1"
+os.environ['CUDA_VISIBLE_DEVICES'] = "0"
 
 import os
 import argparse
@@ -101,6 +101,7 @@ def run_coc_inference(
     processor,
     avdi,
     clip_id: str,
+    data_dir: str,
     timestamp_us: int,
 ) -> Optional[Dict]:
     """
@@ -120,6 +121,7 @@ def run_coc_inference(
         # Load data for this timestamp
         data = load_physical_aiavdataset_local(
             clip_id,
+            data_dir,
             t0_us=timestamp_us,
         )
         
@@ -174,6 +176,7 @@ def run_coc_inference(
 
 def process_single_video(
     clip_id: str,
+    data_dir: str,
     meta_actions_data: Dict,
     model: Alpamayo1_5,
     processor,
@@ -255,7 +258,7 @@ def process_single_video(
         
         # Run inference for each of the 21 timestamps
         for ts_us in tqdm(timestamps_us, desc=f"      Inference", leave=False):
-            result = run_coc_inference(model, processor, avdi, clip_id, ts_us)
+            result = run_coc_inference(model, processor, avdi, clip_id, data_dir, ts_us)
             
             if result is not None:
                 keyframe_result["inference_timestamps"].append(result)
@@ -344,7 +347,7 @@ Examples:
     print(env_path)
     env_vars = load_env(env_path)
     
-    data_dir = Path(env_vars.get('PHYSICAL_AI_AV_DATA_DIR', '/home/xingao/data/PhysicalAI-Autonomous-Vehicles-base-wo-lidar-radar'))
+    data_dir = Path(env_vars.get('PHYSICAL_AI_AV_DATA_DIR', '/home/xingao/data/PhysicalAI-Autonomous-Vehicles'))
     meta_actions_dir = Path(args.meta_actions_dir) if args.meta_actions_dir else data_dir / "labels" / "meta_actions"
     output_dir = Path(args.output_dir) if args.output_dir else data_dir / "labels" / "coc"
     
@@ -425,6 +428,7 @@ Examples:
             # Process this video
             result = process_single_video(
                 clip_id=clip_id,
+                data_dir=data_dir,
                 meta_actions_data=meta_actions_data,
                 model=model,
                 processor=processor,
