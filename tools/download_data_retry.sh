@@ -7,6 +7,23 @@ RETRY_COUNT=0
 # 激活虚拟环境
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$SCRIPT_DIR/.."
+
+# 加载用户环境变量（包括 HF_ENDPOINT 等）
+source ~/.bashrc 2>/dev/null || true
+
+# 显式设置 Hugging Face 镜像站
+export HF_ENDPOINT=https://hf-mirror.com
+# 可选：禁用 XET 网关，如果镜像站不支持 XET
+export HF_HUB_DISABLE_XET=1
+# 禁用 HF Transfer（因为未安装 hf_transfer 包）
+export HF_HUB_ENABLE_HF_TRANSFER=0
+
+# 调试：打印环境变量
+echo "HF_ENDPOINT=$HF_ENDPOINT"
+echo "HF_HUB_DISABLE_XET=$HF_HUB_DISABLE_XET"
+echo "HF_HUB_ENABLE_HF_TRANSFER=$HF_HUB_ENABLE_HF_TRANSFER"
+
+# 激活虚拟环境
 source "$PROJECT_DIR/.venv/bin/activate"
 
 # 切换到项目根目录

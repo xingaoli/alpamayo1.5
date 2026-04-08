@@ -14,8 +14,10 @@ start_download() {
         echo "[$(date)] 下载任务已在运行中 (PID: $(cat $PID_FILE))" | tee -a "$LOG_FILE"
         return
     fi
-    
+
     echo "[$(date)] 启动下载任务..." | tee -a "$LOG_FILE"
+    # 加载用户环境变量（包括 HF_ENDPOINT 等）
+    source ~/.bashrc 2>/dev/null || true
     # 激活虚拟环境后运行
     source "$SCRIPT_DIR/../.venv/bin/activate"
     bash "$DOWNLOAD_SCRIPT" >> "$LOG_FILE" 2>&1 &
