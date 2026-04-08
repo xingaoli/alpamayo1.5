@@ -33,36 +33,51 @@ t0_us = 4_000_000
 
 data_scene1 = load_physical_aiavdataset_local(clip_id, t0_us=t0_us)
 
-messages = helper.create_message(
-    data_scene1["image_frames"].flatten(0, 1),
-    camera_indices=data_scene1["camera_indices"],
-)
-inputs = processor.apply_chat_template(
-    messages,
-    tokenize=True,
-    add_generation_prompt=False,
-    continue_final_message=True,
-    return_dict=True,
-    return_tensors="pt",
-)
-model_inputs = helper.to_device(
-    {
-        "tokenized_data": inputs,
-        "ego_history_xyz": data_scene1["ego_history_xyz"],
-        "ego_history_rot": data_scene1["ego_history_rot"],
-    },
-    "cuda",
-)
+nav_text = "Turn left in 10m"
 
+print(f"Navigation instruction: {nav_text}")
+print(f"Counterfactual (swapped): {nav_utils.swap_direction(nav_text)}")
 
+torch.cuda.manual_seed_all(42)
 with torch.autocast("cuda", dtype=torch.bfloat16):
-    pred_xyz, pred_rot, extra = model.sample_trajectories_from_data_with_vlm_rollout(
-        data=model_inputs,
+    nav_result = nav_utils.compare_nav_conditions(
+        model=model,
+        processor=processor,
+        data=data_scene1,
+        nav_text=nav_text,
+        num_traj_samples=6,
         top_p=0.98,
         temperature=0.6,
-        num_traj_samples=1,
         max_generation_length=256,
-        return_extra=True,
+        return_extra=False,
+        # comment out the following lines to use the default inference function
+        nav_inference_fn=model.sample_trajectories_from_data_with_vlm_rollout_cfg_nav,
+        additional_nav_inference_kwargs={
+            "diffusion_kwargs": {
+                "use_classifier_free_guidance": True,
+                # 0 = unguided only, 1 = guidance only, >1 = more guidance
+                "inference_guidance_weight": 1.5,
+                # The temperature for controlling the initial noise. Note that using
+                # temperature < 1.0 will result in a more stable sampling with less diversity.
+                "temperature": 0.6,
+            }
+        },
     )
 
-print("Chain-of-Causation (per trajectory):\n", extra["cot"][0])
+print(f"Trajectories per condition: {nav_result.pred_with_nav.shape[2]}")
+
+camera_grid = make_camera_grid(
+    data_scene1["image_frames"], camera_indices=data_scene1["camera_indices"]
+)
+
+fig = plot_bev_comparison(
+    pred_with_nav=nav_result.pred_with_nav,
+    pred_no_nav=nav_result.pred_no_nav,
+    pred_counterfactual=nav_result.pred_counterfactual,
+    nav_text=nav_result.nav_text,
+    nav_text_swapped=nav_result.nav_text_swapped,
+    gt_future_xyz=data_scene1.get("ego_future_xyz"),
+    camera_images=camera_grid,
+    title=f'Navigation: "{nav_text}"',
+)
+plt.show()
