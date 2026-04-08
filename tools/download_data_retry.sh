@@ -4,8 +4,16 @@
 MAX_RETRIES=9999
 RETRY_COUNT=0
 
+# 激活虚拟环境
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$SCRIPT_DIR/.."
+source "$PROJECT_DIR/.venv/bin/activate"
+
+# 切换到项目根目录
+cd "$PROJECT_DIR"
+
 # 下载命令
-DOWNLOAD_CMD="python tools/download_data.py --chunk_id 0 --local_dir data/PhysicalAI-Autonomous-Vehicles-mini"
+DOWNLOAD_CMD="python tools/download_data.py --chunk_id -1 --local_dir /mnt/hdd_data/public_data/PhysicalAI-Autonomous-Vehicles-only-4-cam"
 
 # 循环下载，直到成功或达到最大重试次数
 while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
