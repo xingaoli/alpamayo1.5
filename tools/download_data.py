@@ -17,7 +17,12 @@ print(chunk_id_list)
 
 # chunk_id_list = args.chunk_id.split(',')
 local_dir = args.local_dir
-ds = PhysicalAIAVDatasetInterface(token=True, local_dir=local_dir)
+# 禁用下载大小确认提示（后台运行无法交互式输入）
+ds = PhysicalAIAVDatasetInterface(
+    token=True,
+    local_dir=local_dir,
+    confirm_download_threshold_gb=float("inf"),
+)
 
 for chunk_id in chunk_id_list:
 
