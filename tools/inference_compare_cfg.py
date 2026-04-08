@@ -25,7 +25,36 @@ from alpamayo1_5.load_physical_aiavdataset_local import load_physical_aiavdatase
 from alpamayo1_5 import helper, nav_utils
 from alpamayo1_5.viz_utils import make_camera_grid, plot_bev_comparison
 
-model = Alpamayo1_5.from_pretrained("ckpts/Alpamayo-1.5-10B", dtype=torch.bfloat16).to('cuda')
+# Define device map to split model across 2 GPUs
+# With CUDA_VISIBLE_DEVICES="2,3", cuda:0 refers to GPU 2, cuda:1 refers to GPU 3
+device_map = {
+    "vlm": "cuda:0",  # VLM (8B) on first GPU (physical GPU 2)
+    "expert": "cuda:1",  # Expert model on second GPU (physical GPU 3)
+    "diffusion": "cuda:1",  # Diffusion on second GPU
+    "action_in_proj": "cuda:1",  # Action input projection on second GPU
+    "action_out_proj": "cuda:1",  # Action output projection on second GPU
+}
+
+print("Loading model with multi-GPU device map...")
+print(f"Device map: {device_map}")
+model = Alpamayo1_5.from_pretrained("ckpts/Alpamayo-1.5-10B", dtype=torch.bfloat16, device_map=device_map)
+
+# Print GPU memory usage
+def print_gpu_memory():
+    for i in range(torch.cuda.device_count()):
+        allocated = torch.cuda.memory_allocated(i) / 1024**3
+        reserved = torch.cuda.memory_reserved(i) / 1024**3
+        print(f"GPU {i} (physical GPU {int(os.environ.get('CUDA_VISIBLE_DEVICES', '0').split(',')[i]) if i < len(os.environ.get('CUDA_VISIBLE_DEVICES', '0').split(',')) else i}): "
+              f"Allocated={allocated:.2f} GB, Reserved={reserved:.2f} GB")
+
+print("\nGPU Memory after model loading:")
+print_gpu_memory()
+
+# Store model device info for data movement
+vlm_device = model.vlm.device
+expert_device = model.expert.device if hasattr(model.expert, 'device') else next(model.expert.parameters()).device
+print(f"\nVLM device: {vlm_device}")
+print(f"Expert device: {expert_device}")
 
 processor = helper.get_processor(model.tokenizer)
 clip_id = "ef4264ed-0fd2-4a64-9831-87e1aae28407"
@@ -80,4 +109,8 @@ fig = plot_bev_comparison(
     camera_images=camera_grid,
     title=f'Navigation: "{nav_text}"',
 )
+
+print("\nFinal GPU Memory Usage:")
+print_gpu_memory()
+
 plt.show()

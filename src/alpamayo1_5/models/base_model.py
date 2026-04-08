@@ -408,8 +408,15 @@ class ReasoningVLA(PreTrainedModel, TrajectoryFusionMixin):
     def from_pretrained_submodules(
         cls,
         config: ReasoningVLAConfig,
+        device_map: dict[str, Any] | None = None,
     ) -> "ReasoningVLA":
-        """Load submodules with pretrained submodules and initialize the model."""
+        """Load submodules with pretrained submodules and initialize the model.
+        
+        Args:
+            config: Model configuration.
+            device_map: Optional device mapping for placing model components on different devices.
+                Example: {"vlm": "cuda:0", "expert": "cuda:1"}
+        """
         pretrained_modules = {}
 
         # Load VLM
@@ -418,6 +425,10 @@ class ReasoningVLA(PreTrainedModel, TrajectoryFusionMixin):
             dtype=config.model_dtype,
             attn_implementation=config.attn_implementation,
         )
+        
+        # Apply device placement for VLM if device_map is provided
+        if device_map and "vlm" in device_map:
+            vlm = vlm.to(device_map["vlm"])
 
         original_vocab_size = vlm.config.text_config.vocab_size
         vlm.resize_token_embeddings(config.vocab_size)
@@ -429,11 +440,22 @@ class ReasoningVLA(PreTrainedModel, TrajectoryFusionMixin):
             traj_tokenizer = hyu.instantiate(config.traj_tokenizer_cfg)
             pretrained_modules["traj_tokenizer"] = traj_tokenizer
 
-        return cls(
-            config,
-            pretrained_modules=pretrained_modules,
-            original_vocab_size=original_vocab_size,
-        )
+        # Pass device_map to __init__ if the subclass supports it
+        import inspect
+        init_signature = inspect.signature(cls.__init__)
+        if "device_map" in init_signature.parameters:
+            return cls(
+                config,
+                pretrained_modules=pretrained_modules,
+                original_vocab_size=original_vocab_size,
+                device_map=device_map,
+            )
+        else:
+            return cls(
+                config,
+                pretrained_modules=pretrained_modules,
+                original_vocab_size=original_vocab_size,
+            )
 
     def get_output_embeddings(self) -> torch.nn.Module:
         """Get the output embeddings of the model."""

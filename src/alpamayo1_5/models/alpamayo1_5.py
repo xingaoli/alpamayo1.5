@@ -85,11 +85,61 @@ class Alpamayo1_5(ReasoningVLA):
     config_class: type[Alpamayo1_5Config] = Alpamayo1_5Config
     base_model_prefix = "vlm"
 
+    @classmethod
+    def from_pretrained(
+        cls,
+        pretrained_model_name_or_path: str,
+        device_map: dict[str, str] | None = None,
+        *args: Any,
+        **kwargs: Any,
+    ) -> "Alpamayo1_5":
+        """Load pretrained Alpamayo1_5 model with optional multi-GPU placement.
+        
+        Args:
+            pretrained_model_name_or_path: Path or name of the pretrained model.
+            device_map: Optional device mapping for placing model components on different GPUs.
+                Example: {"vlm": "cuda:0", "expert": "cuda:1", "diffusion": "cuda:1"}
+                If None, all components will be placed on the default CUDA device.
+            *args: Additional positional arguments passed to config loading.
+            **kwargs: Additional keyword arguments passed to config loading.
+        
+        Returns:
+            Loaded Alpamayo1_5 model instance.
+        
+        Example:
+            # Single GPU (default)
+            model = Alpamayo1_5.from_pretrained("ckpts/Alpamayo-1.5-10B", dtype=torch.bfloat16)
+            
+            # Multi-GPU: VLM on GPU 0, expert/diffusion on GPU 1
+            device_map = {
+                "vlm": "cuda:0",
+                "expert": "cuda:1",
+                "diffusion": "cuda:1",
+                "action_in_proj": "cuda:1",
+                "action_out_proj": "cuda:1",
+            }
+            model = Alpamayo1_5.from_pretrained(
+                "ckpts/Alpamayo-1.5-10B", 
+                dtype=torch.bfloat16,
+                device_map=device_map,
+            )
+        """
+        # Load config
+        config = Alpamayo1_5Config.from_pretrained(
+            pretrained_model_name_or_path, *args, **kwargs
+        )
+        
+        # Load the model using from_pretrained_submodules with device_map
+        model = cls.from_pretrained_submodules(config, device_map=device_map)
+        
+        return model
+
     def __init__(
         self,
         config: Alpamayo1_5Config,
         pretrained_modules: dict[str, torch.nn.Module] | None = None,
         original_vocab_size: int | None = None,
+        device_map: dict[str, str] | None = None,
     ):
         super().__init__(config, pretrained_modules, original_vocab_size, print_param_count=False)
 
@@ -125,6 +175,17 @@ class Alpamayo1_5(ReasoningVLA):
             self.diffusion = self.diffusion.to(dtype=expert_dtype)
             self.action_in_proj = self.action_in_proj.to(dtype=expert_dtype)
             self.action_out_proj = self.action_out_proj.to(dtype=expert_dtype)
+
+        # Apply device placement if device_map is provided
+        if device_map is not None:
+            if "expert" in device_map:
+                self.expert = self.expert.to(device_map["expert"])
+            if "diffusion" in device_map:
+                self.diffusion = self.diffusion.to(device_map["diffusion"])
+            if "action_in_proj" in device_map:
+                self.action_in_proj = self.action_in_proj.to(device_map["action_in_proj"])
+            if "action_out_proj" in device_map:
+                self.action_out_proj = self.action_out_proj.to(device_map["action_out_proj"])
 
         self.post_init()
 
@@ -319,12 +380,21 @@ class Alpamayo1_5(ReasoningVLA):
             device=device,
             prefix_mask=prefix_mask,
         )
+        
+        # Move KV cache and expert-related tensors to expert device
+        expert_device = next(self.expert.parameters()).device
+        # Move prompt_cache to expert device if it's on a different device
+        # The cache is on VLM device, we need it on expert device
+        # We'll move it lazily in the step function to avoid upfront cost
 
         forward_kwargs = {}
         if self.config.expert_non_causal_attention:
             forward_kwargs["is_causal"] = False
 
         # 2) Define denoising step that consumes noisy action and timestep
+        # Get expert device for tensor movement
+        expert_device = next(self.expert.parameters()).device
+        
         def step_fn(
             x: torch.Tensor,
             t: torch.Tensor,
@@ -332,18 +402,27 @@ class Alpamayo1_5(ReasoningVLA):
             # x: (B*, *action_dim)
             # t: broadcastable to x leading dims
             b_star = x.shape[0]
+            
+            # Move inputs to expert device if needed
+            x = x.to(expert_device)
+            t = t.to(expert_device) if isinstance(t, torch.Tensor) else t
+            
             # Project noisy action to expert token embeddings for the n future tokens
             # Expect shape (b*, n_token_per_traj, hidden_size)
             future_token_embeds = self.action_in_proj(x, t)
             if future_token_embeds.dim() == 2:
                 future_token_embeds = future_token_embeds.view(b_star, n_diffusion_tokens, -1)
 
+            # Move position_ids and attention_mask to expert device if needed
+            position_ids_device = position_ids.to(expert_device) if position_ids.device != expert_device else position_ids
+            attention_mask_device = attention_mask.to(expert_device) if attention_mask.device != expert_device else attention_mask
+
             # Run expert with cached prefill, only on the future tokens
             expert_out_base = self.expert(
                 inputs_embeds=future_token_embeds,
-                position_ids=position_ids,
+                position_ids=position_ids_device,
                 past_key_values=prompt_cache,
-                attention_mask=attention_mask,
+                attention_mask=attention_mask_device,
                 use_cache=True,
                 **forward_kwargs,
             )
@@ -360,14 +439,36 @@ class Alpamayo1_5(ReasoningVLA):
         total_batch = B * n_samples_total
         if diffusion_kwargs is None:
             diffusion_kwargs = {}
+        
+        # Move KV cache to expert device before diffusion sampling
+        def move_cache_to_device(cache, target_device):
+            """Move a DynamicCache to the target device."""
+            if cache is None:
+                return cache
+            
+            # Iterate through all layers and move tensors to target device
+            for layer in cache.layers:
+                # Move keys and values
+                if hasattr(layer, 'keys') and layer.keys is not None:
+                    layer.keys = layer.keys.to(target_device)
+                if hasattr(layer, 'values') and layer.values is not None:
+                    layer.values = layer.values.to(target_device)
+            
+            return cache
+        
+        prompt_cache = move_cache_to_device(prompt_cache, expert_device)
 
         sampled_action = self.diffusion.sample(
             batch_size=total_batch,
             step_fn=step_fn,
-            device=device,
+            device=expert_device,  # Run diffusion on expert device
             return_all_steps=False,
             **diffusion_kwargs,
         )
+        
+        # Move result back to VLM device for subsequent processing
+        if sampled_action.device != device:
+            sampled_action = sampled_action.to(device)
 
         # Repeat history to align with num_traj_samples
         hist_xyz_rep = einops.repeat(
@@ -600,6 +701,9 @@ class Alpamayo1_5(ReasoningVLA):
             forward_kwargs["is_causal"] = False
 
         # 3) Define denoising step that consumes noisy action and timestep
+        # Get expert device for tensor movement
+        expert_device = next(self.expert.parameters()).device
+        
         def step_fn(
             x: torch.Tensor,
             t: torch.Tensor,
@@ -610,19 +714,28 @@ class Alpamayo1_5(ReasoningVLA):
             # x: (B*, *action_dim)
             # t: broadcastable to x leading dims
             b_star = x.shape[0]
+            
+            # Move inputs to expert device if needed
+            x = x.to(expert_device)
+            t = t.to(expert_device) if isinstance(t, torch.Tensor) else t
+            
             # Project noisy action to expert token embeddings for the n future tokens
             # Expect shape (b*, n_token_per_traj, hidden_size)
             future_token_embeds = self.action_in_proj(x, t)
             if future_token_embeds.dim() == 2:
                 future_token_embeds = future_token_embeds.view(b_star, n_diffusion_tokens, -1)
 
+            # Move position_ids and attention_mask to expert device if needed
+            position_ids_device = position_ids.to(expert_device) if position_ids.device != expert_device else position_ids
+            attention_mask_device = attention_mask.to(expert_device) if attention_mask.device != expert_device else attention_mask
+
             # Run expert with cached prefill, only on the future tokens
             prefill_seq_len = past_key_values.get_seq_length()
             expert_out_base = self.expert(
                 inputs_embeds=future_token_embeds,
-                position_ids=position_ids,
+                position_ids=position_ids_device,
                 past_key_values=past_key_values,
-                attention_mask=attention_mask,
+                attention_mask=attention_mask_device,
                 use_cache=True,
                 **forward_kwargs,
             )
@@ -639,6 +752,27 @@ class Alpamayo1_5(ReasoningVLA):
         total_batch = B * n_samples_total
         if diffusion_kwargs is None:
             diffusion_kwargs = {}
+        
+        # Move KV caches to expert device before diffusion sampling
+        # This needs to be done once, not in every step
+        def move_cache_to_device(cache, target_device):
+            """Move a DynamicCache to the target device."""
+            if cache is None:
+                return cache
+            
+            # Iterate through all layers and move tensors to target device
+            for layer in cache.layers:
+                # Move keys and values
+                if hasattr(layer, 'keys') and layer.keys is not None:
+                    layer.keys = layer.keys.to(target_device)
+                if hasattr(layer, 'values') and layer.values is not None:
+                    layer.values = layer.values.to(target_device)
+            
+            return cache
+        
+        # Move both guided and unguided caches to expert device
+        prompt_cache = move_cache_to_device(prompt_cache, expert_device)
+        unguided_prompt_cache = move_cache_to_device(unguided_prompt_cache, expert_device)
 
         sampled_action = self.diffusion.sample(
             batch_size=total_batch,
@@ -654,10 +788,14 @@ class Alpamayo1_5(ReasoningVLA):
                 attention_mask=unguided_attention_mask,
                 position_ids=unguided_position_ids,
             ),
-            device=device,
+            device=expert_device,  # Run diffusion on expert device
             return_all_steps=False,
             **diffusion_kwargs,
         )
+        
+        # Move result back to VLM device for subsequent processing
+        if sampled_action.device != device:
+            sampled_action = sampled_action.to(device)
 
         # Repeat history to align with num_traj_samples
         hist_xyz_rep = einops.repeat(

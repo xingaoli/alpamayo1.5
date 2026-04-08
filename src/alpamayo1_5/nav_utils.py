@@ -147,12 +147,15 @@ def compare_nav_conditions(
             return_dict=True,
             return_tensors="pt",
         )
+        # Move to VLM device (the first GPU)
         model_inputs = {
             "tokenized_data": inputs,
             "ego_history_xyz": data["ego_history_xyz"],
             "ego_history_rot": data["ego_history_rot"],
         }
-        return helper.to_device(model_inputs, "cuda")
+        # Get device from model's VLM
+        vlm_device = next(model.vlm.parameters()).device
+        return helper.to_device(model_inputs, vlm_device)
 
     def _run(model_inputs: dict) -> tuple[torch.Tensor, dict | None]:
         _inference_kwargs = inference_kwargs.copy()
@@ -162,6 +165,11 @@ def compare_nav_conditions(
         )
         pred_xyz = outputs[0]
         extra = outputs[2] if return_extra and len(outputs) > 2 else None
+        
+        # Clean up to free memory
+        del outputs
+        torch.cuda.empty_cache()
+        
         return pred_xyz.cpu(), extra
 
     def _run_nav(model_inputs: dict) -> tuple[torch.Tensor, dict | None]:
@@ -174,6 +182,11 @@ def compare_nav_conditions(
         )
         pred_xyz = outputs[0]
         extra = outputs[2] if return_extra and len(outputs) > 2 else None
+        
+        # Clean up to free memory
+        del outputs
+        torch.cuda.empty_cache()
+        
         return pred_xyz.cpu(), extra
 
     inputs_with_nav = _build_inputs(nav_text)
@@ -181,8 +194,22 @@ def compare_nav_conditions(
     inputs_counterfactual = _build_inputs(nav_text_swapped)
 
     pred_with_nav, extra_with = _run_nav(inputs_with_nav)
+    
+    # Clean up intermediate data
+    del inputs_with_nav
+    torch.cuda.empty_cache()
+    
     pred_no_nav, extra_no = _run(inputs_no_nav)
+    
+    # Clean up intermediate data
+    del inputs_no_nav
+    torch.cuda.empty_cache()
+    
     pred_counter, extra_counter = _run_nav(inputs_counterfactual)
+    
+    # Clean up
+    del inputs_counterfactual
+    torch.cuda.empty_cache()
 
     return NavComparisonResult(
         pred_with_nav=pred_with_nav,
