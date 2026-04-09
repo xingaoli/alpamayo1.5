@@ -36,7 +36,7 @@ def main() -> None:
         frames=data["image_frames"].flatten(0, 1), camera_indices=data["camera_indices"]
     )
 
-    model = Alpamayo1_5.from_pretrained("nvidia/Alpamayo-1.5-10B", dtype=torch.bfloat16).to("cuda")
+    model = Alpamayo1_5.from_pretrained("ckpts/Alpamayo-1.5-10B", dtype=torch.bfloat16).to("cuda")
     processor = helper.get_processor(model.tokenizer)
 
     inputs = processor.apply_chat_template(

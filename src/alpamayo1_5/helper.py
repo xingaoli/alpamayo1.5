@@ -22,7 +22,7 @@ import collections.abc
 
 MIN_PIXELS = 163840
 MAX_PIXELS = 196608
-BASE_PROCESSOR_NAME = "/home/xingao/code/Alpamayo1.5/ckpts/Alpamayo-1.5-Qwen3-VL-8B"
+BASE_PROCESSOR_NAME = "ckpts/Qwen3-VL-8B-Instruct-config"
 
 CAMERA_DISPLAY_NAMES = {
     0: "Front left camera",
