@@ -19,7 +19,7 @@ import physical_ai_av.egomotion as egomotion_module
 
 def load_physical_aiavdataset_local(
     clip_id: str,
-    data_dir: str = "/home/xingao/code/Alpamayo1.5/data/PhysicalAI-Autonomous-Vehicles",
+    data_dir: str | None = None,
     t0_us: int = 5_100_000,
     num_history_steps: int = 16,
     num_future_steps: int = 64,
@@ -35,6 +35,7 @@ def load_physical_aiavdataset_local(
     Args:
         clip_id: The clip ID to load data from.
         data_dir: Path to the PhysicalAI-Autonomous-Vehicles-base directory.
+            If None, uses ALPAMAYO_DATA_DIR environment variable.
         t0_us: The timestamp (in microseconds) at which to sample the trajectory.
         num_history_steps: Number of history trajectory steps (default: 16).
         num_future_steps: Number of future trajectory steps (default: 64).
@@ -45,6 +46,12 @@ def load_physical_aiavdataset_local(
     Returns:
         A dictionary with the same format as load_physical_aiavdataset.
     """
+    if data_dir is None:
+        data_dir = os.environ.get(
+            "ALPAMAYO_DATA_DIR",
+            "/home/xingao/code/Alpamayo1.5/data/PhysicalAI-Autonomous-Vehicles"
+        )
+    
     data_path = data_dir
 
     # Read clip index to get chunk info

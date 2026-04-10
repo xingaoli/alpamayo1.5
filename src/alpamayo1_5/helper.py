@@ -13,6 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Helper functions for model inference."""
+
+import os
 from transformers import AutoProcessor, AutoTokenizer
 
 from typing import Any
@@ -22,7 +25,10 @@ import collections.abc
 
 MIN_PIXELS = 163840
 MAX_PIXELS = 196608
-BASE_PROCESSOR_NAME = "ckpts/Qwen3-VL-8B-Instruct-config"
+BASE_PROCESSOR_NAME = os.environ.get(
+    "ALPAMAYO_VLM_PROCESSOR_CKPT",
+    "ckpts/Qwen3-VL-8B-Instruct-config"
+)
 
 CAMERA_DISPLAY_NAMES = {
     0: "Front left camera",

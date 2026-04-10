@@ -17,6 +17,7 @@
 
 import copy
 import logging
+import os
 from typing import Any
 
 import einops
@@ -208,7 +209,7 @@ class ReasoningVLAConfig(PretrainedConfig):
 
     def __init__(
         self,
-        vlm_name_or_path: str = "ckpts/Qwen3-VL-8B-Instruct-config",
+        vlm_name_or_path: str | None = None,
         vlm_backend: str = "qwenvl3",
         traj_tokenizer_cfg: dict[str, Any] | None = None,
         hist_traj_tokenizer_cfg: dict[str, Any] | None = None,
@@ -225,6 +226,11 @@ class ReasoningVLAConfig(PretrainedConfig):
         if attn_implementation is None:
             attn_implementation = "flash_attention_2"
         kwargs["attn_implementation"] = attn_implementation
+        if vlm_name_or_path is None:
+            vlm_name_or_path = os.environ.get(
+                "ALPAMAYO_VLM_PROCESSOR_CKPT",
+                "ckpts/Qwen3-VL-8B-Instruct-config"
+            )
         super().__init__(**kwargs)
 
         self.vlm_name_or_path = vlm_name_or_path

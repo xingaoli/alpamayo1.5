@@ -18,6 +18,7 @@
 Loads a dataset, runs inference, and computes the minADE.
 """
 
+import os
 import numpy as np
 import torch
 
@@ -36,7 +37,8 @@ def main() -> None:
         frames=data["image_frames"].flatten(0, 1), camera_indices=data["camera_indices"]
     )
 
-    model = Alpamayo1_5.from_pretrained("ckpts/Alpamayo-1.5-10B", dtype=torch.bfloat16).to("cuda")
+    model_ckpt = os.environ.get("ALPAMAYO_MODEL_CKPT", "ckpts/Alpamayo-1.5-10B")
+    model = Alpamayo1_5.from_pretrained(model_ckpt, dtype=torch.bfloat16).to("cuda")
     processor = helper.get_processor(model.tokenizer)
 
     inputs = processor.apply_chat_template(

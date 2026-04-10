@@ -253,16 +253,21 @@ def process_single_video(
             "frame_index": kf_frame_index,
             "long_action": kf_long_action,
             "lat_action": kf_lat_action,
+            "coc": None,  # CoC result for the keyframe timestamp itself
             "inference_timestamps": [],  # 21 inference results
         }
-        
+
         # Run inference for each of the 21 timestamps
         for ts_us in tqdm(timestamps_us, desc=f"      Inference", leave=False):
             result = run_coc_inference(model, processor, avdi, clip_id, data_dir, ts_us)
-            
+
             if result is not None:
                 keyframe_result["inference_timestamps"].append(result)
                 success_timestamps += 1
+                
+                # Store the CoC result for the keyframe timestamp itself
+                if ts_us == kf_timestamp_us:
+                    keyframe_result["coc"] = result
             else:
                 # Still record the failed timestamp
                 keyframe_result["inference_timestamps"].append({
@@ -270,6 +275,14 @@ def process_single_video(
                     "timestamp_sec": round(ts_us / 1_000_000, 2),
                     "error": "Inference failed",
                 })
+                
+                # Mark as failed if keyframe timestamp itself failed
+                if ts_us == kf_timestamp_us:
+                    keyframe_result["coc"] = {
+                        "timestamp_us": ts_us,
+                        "timestamp_sec": round(ts_us / 1_000_000, 2),
+                        "error": "Inference failed",
+                    }
         
         coc_results["keyframe_coc_results"].append(keyframe_result)
     
@@ -343,11 +356,11 @@ Examples:
     
     # Load environment
     script_dir = Path(__file__).parent.parent
-    env_path = script_dir / "physical_ai_av/.env"
+    env_path = script_dir / ".env"
     print(env_path)
     env_vars = load_env(env_path)
     
-    data_dir = Path(env_vars.get('PHYSICAL_AI_AV_DATA_DIR', '/home/xingao/data/PhysicalAI-Autonomous-Vehicles'))
+    data_dir = Path(env_vars.get('ALPAMAYO_DATA_DIR', '/home/xingao/data/PhysicalAI-Autonomous-Vehicles'))
     meta_actions_dir = Path(args.meta_actions_dir) if args.meta_actions_dir else data_dir / "labels" / "meta_actions"
     output_dir = Path(args.output_dir) if args.output_dir else data_dir / "labels" / "coc"
     
