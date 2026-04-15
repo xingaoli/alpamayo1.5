@@ -74,17 +74,21 @@ Your goal is to identify the **FIRST critical moment** where the driving maneuve
     return prompt
 
 
-def call_llm(prompt: str, client: OpenAI) -> int:
+def call_llm(prompt: str, client: OpenAI, model: str = "default") -> int:
     """Call LLM and parse result"""
     try:
         response = client.chat.completions.create(
-            model="default",
+            model=model,
             messages=[
                 {"role": "system", "content": "You are an expert at detecting semantic changes in autonomous vehicle behavior descriptions. Analyze the frame sequence and find where the behavior meaning first changes."},
                 {"role": "user", "content": prompt}
             ],
             temperature=0.0,
-            max_tokens=1024
+            max_tokens=1024,
+            extra_body={
+                "top_k": 20,
+                "chat_template_kwargs": {"enable_thinking": False},
+            },
         )
 
         result_text = response.choices[0].message.content.strip()

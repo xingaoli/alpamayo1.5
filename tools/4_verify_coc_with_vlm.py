@@ -154,24 +154,25 @@ No explanation, just True or False."""
     return prompt
 
 
-def call_vlm_api(image_base64: str, coc_text: str, client: OpenAI) -> bool:
+def call_vlm_api(image_base64: str, coc_text: str, client: OpenAI, model: str = "default") -> bool:
     """
     Call VLM API to verify if CoC matches the image.
     Uses OpenAI-compatible API with vision support.
-    
+
     Args:
         image_base64: Base64 encoded image
         coc_text: CoC description text
         client: OpenAI client
-    
+        model: Model name to use
+
     Returns:
         True if CoC is correct, False otherwise
     """
     prompt = build_vlm_prompt(coc_text)
-    
+
     try:
         response = client.chat.completions.create(
-            model="default",
+            model=model,
             messages=[
                 {
                     "role": "user",
@@ -190,7 +191,11 @@ def call_vlm_api(image_base64: str, coc_text: str, client: OpenAI) -> bool:
                 }
             ],
             temperature=0.0,
-            max_tokens=100
+            max_tokens=100,
+            extra_body={
+                "top_k": 20,
+                "chat_template_kwargs": {"enable_thinking": False},
+            },
         )
         
         result_text = response.choices[0].message.content.strip()
@@ -215,7 +220,8 @@ def process_single_clip(
     data_dir: str,
     chunk_number: int,
     client: OpenAI,
-    dry_run: bool = False
+    dry_run: bool = False,
+    model: str = "default"
 ) -> dict:
     """
     Process a single clip: verify all its change frames.
@@ -351,6 +357,8 @@ def main():
                         help="OpenAI API Key (default EMPTY)")
     parser.add_argument("--base-url", type=str, default="http://0.0.0.0:8000/v1",
                         help="OpenAI API Base URL")
+    parser.add_argument("--model", type=str, default="ckpts/Qwen3.5-9B",
+                        help="Model name to use")
     parser.add_argument("--dry-run", action="store_true",
                         help="Test mode, do not call VLM")
     parser.add_argument("--chunks", type=str, default=None,
@@ -472,7 +480,8 @@ def main():
                     args.data_dir,
                     chunk_number,
                     client,
-                    args.dry_run
+                    args.dry_run,
+                    args.model
                 )
                 chunk_results.append(result)
             except Exception as e:
