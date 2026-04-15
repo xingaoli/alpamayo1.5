@@ -153,7 +153,7 @@ def process_single_file(file_path: str, client: OpenAI, dry_run: bool = False) -
 
 def main():
     # Load environment variables from .env file
-    env_path = Path(__file__).parent.parent / '.env'
+    env_path = Path(__file__).parent.parent.parent / '.env'
     if env_path.exists():
         load_dotenv(env_path)
         print(f"Loaded .env from: {env_path}")

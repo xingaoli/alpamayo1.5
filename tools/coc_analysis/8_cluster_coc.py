@@ -1,26 +1,5 @@
-#!/usr/bin/env python3
-"""
-Cluster actions and factors extracted from COC sentences.
-Reads coc_train_action_factor.json, clusters actions and factors separately using
-sentence embeddings + UMAP + HDBSCAN, and saves cluster results.
-
-Usage Examples:
-    # 1. Cluster actions (default)
-    python tools/10_cluster_action_and_factor.py --mode action
-
-    # 2. Cluster factors
-    python tools/10_cluster_action_and_factor.py --mode factor
-
-    # 3. Cluster both
-    python tools/10_cluster_action_and_factor.py --mode both
-
-    # 4. Custom min cluster size
-    python tools/10_cluster_action_and_factor.py --mode action --min-cluster-size 3
-"""
-
 import numpy as np
 import json
-from pathlib import Path
 from sentence_transformers import SentenceTransformer
 import umap
 import hdbscan
@@ -30,6 +9,7 @@ import matplotlib.pyplot as plt
 import warnings
 import argparse
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 
 warnings.filterwarnings('ignore')
@@ -37,77 +17,32 @@ plt.rcParams['font.sans-serif'].insert(0, "AR PL UMing CN")
 plt.rcParams['axes.unicode_minus'] = False
 
 
-class ActionFactorCluster:
+class CocCluster:
     def __init__(self, model_name='all-MiniLM-L6-v2'):
         self.model = SentenceTransformer(model_name)
         self.embeddings = None
         self.clusterer = None
         self.umap_embeddings = None
-        self.samples = []
-        self.metadata = []  # 存储每个样本的元数据 (clip_id, frame_idx, source)
 
-    def prepare_data(self, data_path, mode='action'):
-        """加载数据,展开 action_lists 或 factor_lists"""
-        print(f"正在加载数据 (mode={mode})...")
-        raw_data = json.load(open(data_path, 'r', encoding='utf-8'))
+    def prepare_data(self, data_path):
+        """加载数据，展开 coc_lists，构建样本列表和索引映射"""
+        print("正在加载数据...")
+        raw_data = json.load(open(data_path, 'r'))
 
-        self.samples = []
-        self.metadata = []
+        self.samples = []        # coc text
+        self.clip_ids = []       # 每个 coc 对应的 clip_id
+        self.frame_indices = []  # 每个 coc 对应的 frame index (key)
+        self.raw_entries = []    # 原始 entry (用于回溯)
 
         for entry in raw_data:
-            clip_id = entry.get('clip_id', 'unknown')
-            
-            if mode == 'both':
-                # 处理 actions
-                action_lists = entry.get('action_lists', {})
-                for frame_idx, actions in action_lists.items():
-                    if isinstance(actions, list):
-                        for action_text in actions:
-                            if action_text.strip():  # 跳过空字符串
-                                self.samples.append(action_text.strip())
-                                self.metadata.append({
-                                    'clip_id': clip_id,
-                                    'frame_index': frame_idx,
-                                    'source': 'action'
-                                })
-                
-                # 处理 factors
-                factor_lists = entry.get('factor_lists', {})
-                for frame_idx, factors in factor_lists.items():
-                    if isinstance(factors, list):
-                        for factor_text in factors:
-                            if factor_text.strip():  # 跳过空字符串
-                                self.samples.append(factor_text.strip())
-                                self.metadata.append({
-                                    'clip_id': clip_id,
-                                    'frame_index': frame_idx,
-                                    'source': 'factor'
-                                })
-            else:
-                # mode 是 'action' 或 'factor'
-                list_key = f'{mode}_lists'
-                target_lists = entry.get(list_key, {})
-                for frame_idx, items in target_lists.items():
-                    if isinstance(items, list):
-                        for text in items:
-                            if text.strip():  # 跳过空字符串
-                                self.samples.append(text.strip())
-                                self.metadata.append({
-                                    'clip_id': clip_id,
-                                    'frame_index': frame_idx,
-                                    'source': mode
-                                })
+            clip_id = entry['clip_id']
+            for frame_idx, coc_text in entry['coc_lists'].items():
+                self.samples.append(coc_text)
+                self.clip_ids.append(clip_id)
+                self.frame_indices.append(frame_idx)
+                self.raw_entries.append(entry)
 
-        print(f"总样本数: {len(self.samples)}")
-        if mode == 'both':
-            action_count = sum(1 for m in self.metadata if m['source'] == 'action')
-            factor_count = sum(1 for m in self.metadata if m['source'] == 'factor')
-            print(f"  - Actions: {action_count}")
-            print(f"  - Factors: {factor_count}")
-        
-        unique_clips = len(set(m['clip_id'] for m in self.metadata))
-        print(f"来自 {unique_clips} 个 clip")
-        
+        print(f"总样本数: {len(self.samples)}, 来自 {len(set(self.clip_ids))} 个 clip")
         return self.samples
 
     def encode(self):
@@ -117,29 +52,25 @@ class ActionFactorCluster:
         )
         return self.embeddings
 
-    def reduce_dimensionality(self, n_neighbors=50, min_dist=0.05, n_components=5):
+    def reduce_dimensionality(self, n_neighbors=15, min_dist=0.1, n_components=5):
         print("正在降维...")
-        n_samples = len(self.samples)
-        n_neighbors = min(n_neighbors, n_samples - 1)
-        n_components = min(n_components, n_samples - 1)
-
-        print(f"UMAP参数: n_neighbors={n_neighbors}, min_dist={min_dist}, n_components={n_components}")
+        n_neighbors = min(n_neighbors, len(self.samples) - 1)
         umap_reducer = umap.UMAP(
             n_neighbors=n_neighbors,
             min_dist=min_dist,
-            n_components=n_components,
+            n_components=min(n_components, len(self.samples) - 1),
             metric='cosine',
             random_state=42
         )
         self.umap_embeddings = umap_reducer.fit_transform(self.embeddings)
         return self.umap_embeddings
 
-    def cluster(self, min_cluster_size=5):
+    def cluster(self, min_cluster_size=2, min_samples=1):
         print("正在进行语义聚类...")
         n_samples = len(self.umap_embeddings)
 
-        # 自动计算合理参数
-        min_cluster_size = max(min_cluster_size, n_samples // 200)
+        # 自动计算合理参数 — 用更小的 min_cluster_size 让小簇也能被发现
+        min_cluster_size = max(5, n_samples // 200)
         min_samples = max(2, min_cluster_size // 3)
 
         print(f"样本数量: {n_samples}")
@@ -212,7 +143,83 @@ class ActionFactorCluster:
         for lbl, cnt in top_reassigned:
             print(f"  簇 {lbl}: 新增 {cnt} 个样本")
 
-    def visualize_clusters(self, save_path, mode='action'):
+    def merge_clusters_by_centroid(self, similarity_threshold=0.85):
+        """基于 embedding 质心余弦相似度合并语义相近的簇"""
+        print(f"\n正在基于质心相似度合并簇 (阈值: {similarity_threshold})...")
+
+        unique_labels = sorted(set(self.cluster_labels))
+        # 用原始 embedding 算质心，语义更准确
+        centroids = {}
+        for lbl in unique_labels:
+            mask = self.cluster_labels == lbl
+            centroids[lbl] = self.embeddings[mask].mean(axis=0)
+
+        # 建立并查集
+        parent = {lbl: lbl for lbl in unique_labels}
+
+        def find(x):
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        def union(a, b):
+            ra, rb = find(a), find(b)
+            if ra != rb:
+                # 小簇并入大簇
+                size_a = np.sum(self.cluster_labels == ra)
+                size_b = np.sum(self.cluster_labels == rb)
+                if size_a < size_b:
+                    ra, rb = rb, ra
+                parent[rb] = ra
+
+        # 计算所有簇对之间的质心余弦相似度
+        label_list = sorted(unique_labels)
+        n = len(label_list)
+        merge_count = 0
+        for i in range(n):
+            for j in range(i + 1, n):
+                li, lj = label_list[i], label_list[j]
+                ci, cj = centroids[li], centroids[lj]
+                sim = np.dot(ci, cj) / (np.linalg.norm(ci) * np.linalg.norm(cj))
+                if sim >= similarity_threshold:
+                    union(li, lj)
+                    merge_count += 1
+
+        # 重新编号
+        root_set = sorted(set(find(lbl) for lbl in unique_labels))
+        old_to_new = {root: new_id for new_id, root in enumerate(root_set)}
+
+        new_labels = np.array([old_to_new[find(lbl)] for lbl in self.cluster_labels])
+        self.cluster_labels = new_labels
+
+        print(f"合并了 {merge_count} 对簇")
+        print(f"簇数量: {len(unique_labels)} → {len(root_set)}")
+
+        # 打印合并详情（每个新簇由哪些旧簇组成）
+        old_to_root = {}
+        for lbl in unique_labels:
+            root = find(lbl)
+            old_to_root.setdefault(root, []).append(lbl)
+
+        merged_groups = {r: groups for r, groups in old_to_root.items() if len(groups) > 1}
+        if merged_groups:
+            print("\n合并详情:")
+            for root, groups in merged_groups.items():
+                new_id = old_to_new[root]
+                # 取代表样本
+                mask = np.isin(self.cluster_labels, new_id)
+                centroid = self.embeddings[mask].mean(axis=0)
+                sims = [np.dot(centroid, e) / (np.linalg.norm(centroid) * np.linalg.norm(e))
+                        for e in self.embeddings[mask]]
+                rep_idx = np.where(mask)[0][np.argmax(sims)]
+                rep_text = self.samples[rep_idx][:80]
+
+                print(f"  新簇{new_id}: 旧簇[{', '.join(str(g) for g in groups)}] → {rep_text}")
+
+        return self.cluster_labels
+
+    def visualize_clusters(self, save_path):
         """t-SNE 可视化聚类结果"""
         if self.umap_embeddings is None:
             raise ValueError("请先执行降维")
@@ -262,9 +269,9 @@ class ActionFactorCluster:
                        c=[color], label=label_name, alpha=alpha, s=s, marker=marker,
                        edgecolors='black', linewidth=0.3)
 
-        title = f'{mode.capitalize()} Semantic Clustering\n({n_samples} samples, ' \
-                f'{len(unique_labels) - (1 if -1 in unique_labels else 0)} clusters)'
-        ax.set_title(title, fontsize=14)
+        ax.set_title(f'COC Semantic Clustering\n({n_samples} samples, '
+                     f'{len(unique_labels) - (1 if -1 in unique_labels else 0)} clusters)',
+                     fontsize=14)
         ax.legend(bbox_to_anchor=(0, 1), loc='upper left', fontsize=7, ncol=2)
 
         plt.tight_layout()
@@ -272,8 +279,8 @@ class ActionFactorCluster:
         print(f"可视化图已保存: {save_path}")
         plt.close()
 
-    def build_cluster_map(self, mode='action'):
-        """构建聚类结果,每个样本能映射回 clip_id"""
+    def build_cluster_map(self):
+        """构建聚类结果，每个样本能映射回 clip_id"""
         cluster_label2sample_idx = {}
         for label in set(self.cluster_labels):
             cluster_label2sample_idx[int(label)] = []
@@ -284,28 +291,27 @@ class ActionFactorCluster:
         # 构建带完整映射信息的聚类结果
         cluster_results = {}
         for label, indices in cluster_label2sample_idx.items():
-            cluster_results[str(label)] = [
+            cluster_results[label] = [
                 {
                     'sample_idx': idx,
-                    'clip_id': self.metadata[idx]['clip_id'],
-                    'frame_index': self.metadata[idx]['frame_index'],
-                    'source': self.metadata[idx]['source'],
-                    'text': self.samples[idx],
+                    'clip_id': self.clip_ids[idx],
+                    'frame_index': self.frame_indices[idx],
+                    'coc_text': self.samples[idx],
                 }
                 for idx in indices
             ]
 
         return cluster_results
 
-    def analyze_and_print(self, cluster_results, mode='action'):
+    def analyze_and_print(self, cluster_results):
         """打印聚类摘要"""
         print("\n" + "=" * 60)
-        print(f"{mode.capitalize()} 聚类分析结果")
+        print("聚类分析结果")
         print("=" * 60)
 
-        for label in sorted(cluster_results.keys(), key=lambda x: int(x)):
+        for label in sorted(cluster_results.keys()):
             samples = cluster_results[label]
-            if label == '-1':
+            if label == -1:
                 print(f"\n噪声点 ({len(samples)}个):")
             else:
                 # 计算簇内平均相似度
@@ -328,7 +334,7 @@ class ActionFactorCluster:
 
                 # 显示前几个样本
                 for s in samples[:3]:
-                    print(f"    - [{s['clip_id'][:8]}...] frame={s['frame_index']}: {s['text'][:70]}...")
+                    print(f"    - [{s['clip_id'][:8]}...] frame={s['frame_index']}: {s['coc_text'][:70]}...")
                 if len(samples) > 3:
                     print(f"    ... 还有 {len(samples) - 3} 个样本")
 
@@ -337,7 +343,7 @@ class ActionFactorCluster:
 
 def main():
     # Load environment variables from .env file
-    env_path = Path(__file__).parent.parent / '.env'
+    env_path = Path(__file__).parent.parent.parent / '.env'
     if env_path.exists():
         load_dotenv(env_path)
         print(f"Loaded .env from: {env_path}")
@@ -346,24 +352,21 @@ def main():
     default_data_dir = "/home/xingao/code/Alpamayo1.5/data/PhysicalAI-Autonomous-Vehicles"
     data_dir = os.getenv("ALPAMAYO_DATA_DIR", default_data_dir)
 
-    parser = argparse.ArgumentParser(description="Cluster actions and factors extracted from COC sentences")
+    parser = argparse.ArgumentParser(description="Cluster COC sentences using sentence embeddings")
     parser.add_argument("--input-file", type=str,
-                        default=os.path.join(data_dir, "labels", "coc_train", "coc_train_action_factor.json"),
-                        help="Input JSON file path (output from tool 7)")
+                        default=os.path.join(data_dir, "labels", "coc_train", "coc_train_change.json"),
+                        help="Input JSON file path")
     parser.add_argument("--output-dir", type=str,
                         default=os.path.join(data_dir, "labels", "coc_train"),
                         help="Output directory for cluster results")
     parser.add_argument("--model", type=str, default="ckpts/all-mpnet-base-v2",
                         help="Sentence transformer model name")
-    parser.add_argument("--mode", type=str, default="action",
-                        choices=["action", "factor"],
-                        help="What to cluster: action or factor")
     parser.add_argument("--min-cluster-size", type=int, default=5,
                         help="Minimum cluster size for HDBSCAN")
-    parser.add_argument("--n-neighbors", type=int, default=50,
-                        help="UMAP n_neighbors parameter (default: 50 for better clustering)")
-    parser.add_argument("--min-dist", type=float, default=0.05,
-                        help="UMAP min_dist parameter (default: 0.05 for tighter clusters)")
+    parser.add_argument("--n-neighbors", type=int, default=15,
+                        help="UMAP n_neighbors parameter")
+    parser.add_argument("--min-dist", type=float, default=0.1,
+                        help="UMAP min_dist parameter")
     parser.add_argument("--n-components", type=int, default=5,
                         help="UMAP n_components parameter")
     parser.add_argument("--no-visualize", action="store_true",
@@ -374,53 +377,45 @@ def main():
     print(f"Data directory: {data_dir}")
     print(f"Input file: {args.input_file}")
     print(f"Output directory: {args.output_dir}")
-    print(f"Mode: {args.mode}")
 
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
 
     # Initialize clusterer
-    clusterer = ActionFactorCluster(model_name=args.model)
+    coc = CocCluster(model_name=args.model)
 
     # 1. Load data
-    clusterer.prepare_data(args.input_file, mode=args.mode)
-
-    if len(clusterer.samples) == 0:
-        print("错误: 没有找到可聚类的样本!")
-        return
+    coc.prepare_data(args.input_file)
 
     # 2. Encode
-    clusterer.encode()
+    coc.encode()
 
     # 3. Reduce dimensionality
-    clusterer.reduce_dimensionality(
+    coc.reduce_dimensionality(
         n_neighbors=args.n_neighbors,
         min_dist=args.min_dist,
-        n_components=min(args.n_components, len(clusterer.samples) - 1)
+        n_components=min(args.n_components, len(coc.samples) - 1)
     )
 
     # 4. Cluster
-    clusterer.cluster(min_cluster_size=args.min_cluster_size)
+    coc.cluster()
 
     # 5. Build cluster map
-    cluster_results = clusterer.build_cluster_map(mode=args.mode)
+    cluster_results = coc.build_cluster_map()
 
     # 6. Print analysis
-    clusterer.analyze_and_print(cluster_results, mode=args.mode)
+    coc.analyze_and_print(cluster_results)
 
     # 7. Visualize (optional)
     if not args.no_visualize:
-        vis_mode = args.mode if args.mode != 'both' else 'action_factor'
-        vis_path = os.path.join(args.output_dir, f"coc_{vis_mode}_cluster_vis.png")
-        clusterer.visualize_clusters(vis_path, mode=vis_mode)
+        vis_path = os.path.join(args.output_dir, "coc_cluster_vis.png")
+        coc.visualize_clusters(vis_path)
 
     # 8. Save results
-    output_file = os.path.join(args.output_dir, f"coc_{args.mode}_cluster_results.json")
-    with open(output_file, 'w', encoding='utf-8') as f:
+    output_path = os.path.join(args.output_dir, "coc_cluster_results.json")
+    with open(output_path, 'w', encoding='utf-8') as f:
         json.dump(cluster_results, f, indent=2, ensure_ascii=False)
-    print(f"\n聚类结果已保存到: {output_file}")
-    print(f"总簇数量: {len(cluster_results)}")
-    print(f"总样本数: {len(clusterer.samples)}")
+    print(f"\n聚类结果已保存到: {output_path}")
 
 
 if __name__ == "__main__":

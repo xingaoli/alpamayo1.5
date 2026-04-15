@@ -11,9 +11,6 @@ Usage:
     python3 extract_coc_combined.py --chunks chunk_0000 chunk_0001
     python3 extract_coc_combined.py --chunks all
 """
-import os
-os.chdir('/home/xingao/code/Alpamayo1.5')
-
 import json
 from pathlib import Path
 from typing import Dict, List
@@ -198,7 +195,7 @@ Examples:
     args = parser.parse_args()
     
     # Determine paths
-    script_dir = Path(__file__).parent.parent
+    script_dir = Path(__file__).parent.parent.parent
     data_dir = script_dir / "data" / "PhysicalAI-Autonomous-Vehicles"
     
     coc_dir = Path(args.coc_dir) if args.coc_dir else data_dir / "labels" / "coc"

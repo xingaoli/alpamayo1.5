@@ -272,7 +272,7 @@ def aggregate_mode_change(data_dir: str, output_path: Path):
 
 def main():
     # Load environment variables
-    env_path = Path(__file__).parent.parent / '.env'
+    env_path = Path(__file__).parent.parent.parent / '.env'
     if env_path.exists():
         load_dotenv(env_path)
         print(f"Loaded .env from: {env_path}")

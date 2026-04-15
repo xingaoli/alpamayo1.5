@@ -11,10 +11,8 @@ Usage:
     python3 batch_coc_inference.py --resume  # resume from last checkpoint
 """
 import os
-os.chdir('/home/xingao/code/Alpamayo1.5')
 os.environ['CUDA_VISIBLE_DEVICES'] = "0"
 
-import os
 import argparse
 import json
 from pathlib import Path
@@ -355,7 +353,7 @@ Examples:
     args = parser.parse_args()
     
     # Load environment
-    script_dir = Path(__file__).parent.parent
+    script_dir = Path(__file__).parent.parent.parent
     env_path = script_dir / ".env"
     print(env_path)
     env_vars = load_env(env_path)
