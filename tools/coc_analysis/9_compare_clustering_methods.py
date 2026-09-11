@@ -503,7 +503,7 @@ def main():
         load_dotenv(env_path)
 
     # Default paths
-    default_data_dir = "/home/xingao/code/Alpamayo1.5/data/PhysicalAI-Autonomous-Vehicles"
+    default_data_dir = "/home/xingao/code/NVlabs-alpamayo/alpamayo1.5/data/PhysicalAI-Autonomous-Vehicles"
     data_dir = os.getenv("ALPAMAYO_DATA_DIR", default_data_dir)
 
     parser = argparse.ArgumentParser(description="对比不同聚类方法")

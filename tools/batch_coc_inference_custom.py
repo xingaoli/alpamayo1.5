@@ -22,7 +22,7 @@ Usage:
     python3 batch_coc_inference_custom.py --resume
 """
 import os
-os.chdir('/home/xingao/code/Alpamayo1.5')
+os.chdir('/home/xingao/code/NVlabs-alpamayo/alpamayo1.5')
 os.environ['CUDA_VISIBLE_DEVICES'] = "2"
 
 import argparse

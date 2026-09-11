@@ -49,7 +49,7 @@ def load_physical_aiavdataset_local(
     if data_dir is None:
         data_dir = os.environ.get(
             "ALPAMAYO_DATA_DIR",
-            "/home/xingao/code/Alpamayo1.5/data/PhysicalAI-Autonomous-Vehicles"
+            "/home/xingao/code/NVlabs-alpamayo/alpamayo1.5/data/PhysicalAI-Autonomous-Vehicles"
         )
     
     data_path = data_dir
