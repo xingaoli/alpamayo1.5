@@ -194,7 +194,7 @@ def create_vqa_message(
 
 
 def get_processor(tokenizer: AutoTokenizer) -> AutoProcessor:
-    """Get the processor for the Qwen3-VL-2B-Instruct model."""
+    """Get the processor for the Qwen3-VL (8B-Instruct-config) checkpoint."""
     processor_kwargs = {
         "min_pixels": MIN_PIXELS,
         "max_pixels": MAX_PIXELS,
