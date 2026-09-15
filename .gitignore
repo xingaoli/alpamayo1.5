@@ -226,3 +226,7 @@ physical_ai_av
 .claude
 
 ar1_5_wfm_outputs
+
+# waymo eval/viz outputs
+waymo_eval/eval_outputs
+waymo_eval/viz_outputs
