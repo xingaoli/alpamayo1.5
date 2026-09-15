@@ -34,43 +34,46 @@ Usage
 Run from the project root (so the relative ``ckpts/`` and ``data/`` paths
 resolve). The package must be importable via ``PYTHONPATH=src``::
 
-    cd /home/xingao/code/Alpamayo1.5
+    cd /home/xingao/code/NVlabs-alpamayo/alpamayo1.5
     export PYTHONPATH=src
     export CUDA_VISIBLE_DEVICES=0
 
 Common invocations:
 
-1. **Default** (single frame at t0 = 1.6 s, on every clip under
+1. **Default** (auto-sweep every clip under
    ``<DATA_DIR>/camera/camera_front_wide_120fov``)::
     PYTHONPATH=src \
     python wfm_gen_test/coc_test/ar1_5_wfm_test.py
 
-2. **Single frame at a chosen t0**::
+2. **Batch by clip-id prefix**: run every clip whose
+   ``labels/<clip_id>.json`` id starts with the prefix (e.g. ``fire-seed1``
+   matches all ``fire-seed1*`` clips, including ``fire-seed10000_*``).
+   Outputs default to
+   ``wfm_gen_test/coc_test/ar1_5_wfm_outputs/<prefix>_<timestamp>/``::
+
+    python wfm_gen_test/coc_test/ar1_5_wfm_test.py --clip-prefix fire-seed1
+
+3. **Single frame at a chosen t0**::
 
     python wfm_gen_test/coc_test/ar1_5_wfm_test.py --frame-idx 30
 
-3. **Sweep a range of frames** (saves one PNG per frame + a stitched MP4)::
+4. **Sweep a range of frames** (saves one PNG per frame + a stitched MP4)::
 
     python wfm_gen_test/coc_test/ar1_5_wfm_test.py \
         --frame-start 20 --frame-end 40
 
-4. **Sample multiple trajectories per frame** to visualise the model's
+5. **Sample multiple trajectories per frame** to visualise the model's
    stochastic spread (red = sample 0, magenta dashed = other samples)::
 
     python wfm_gen_test/coc_test/ar1_5_wfm_test.py \
         --frame-idx 30 --num-traj-samples 4
 
-5. **Different clip / ckpt / output dir**::
+6. **Explicit clips / ckpt / output dir**::
 
     python wfm_gen_test/coc_test/ar1_5_wfm_test.py \
         --clip 71ae0d63-ba64-4517-b3f1-90d446abc67d_1869020100000_1869040100000_fire \
         --ckpt /abs/path/to/Alpamayo-1.5-10B \
         --out-dir /tmp/my_outputs
-
-6. **All clips under the front-wide camera** (loop over every .mp4;
-   each clip gets its own PNGs + stitched MP4)::
-
-    python wfm_gen_test/coc_test/ar1_5_wfm_test.py
 
 Environment variables (override the defaults; CLI flags take precedence):
 
@@ -98,12 +101,12 @@ os.environ.setdefault("CUDA_VISIBLE_DEVICES", os.environ.get("CUDA_VISIBLE_DEVIC
 import argparse
 import json
 import textwrap
+import time
 from pathlib import Path
 
 import av  # PyAV (FFmpeg binding) -- used to encode stitched MP4s.
 import cv2
 import numpy as np
-import scipy.spatial.transform as spt
 import torch
 import matplotlib
 
@@ -135,7 +138,6 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 DATA_DIR = Path(
     os.environ.get("WFM_GEN_DATA_DIR", _REPO_ROOT / "data" / "wfm_gen_data")
 )
-DEFAULT_CLIP = "71ae0d63-ba64-4517-b3f1-90d446abc67d_1869020100000_1869040100000_fire"
 DEFAULT_CKPT = os.environ.get(
     "ALPAMAYO_MODEL_CKPT", str(_REPO_ROOT / "ckpts" / "Alpamayo-1.5-10B")
 )
@@ -265,10 +267,21 @@ def parse_args() -> argparse.Namespace:
         description="Run Alpamayo 1.5 (CoC + trajectory) on world-model data."
     )
     p.add_argument(
-        "--clip", default=None,
+        "--clip", nargs="+", default=None,
         help=(
-            "clip id (filename stem). If not set, the script iterates over "
-            "every .mp4 clip under <DATA_DIR>/camera/camera_front_wide_120fov."
+            "clip id(s) (filename stems); may be given multiple times / "
+            "space-separated for explicit batch runs. If not set, either "
+            "--clip-prefix or (by default) every .mp4 clip under "
+            "<DATA_DIR>/camera/camera_front_wide_120fov is used."
+        ),
+    )
+    p.add_argument(
+        "--clip-prefix", default=None,
+        help=(
+            "batch mode: run every clip under <DATA_DIR>/labels whose id "
+            "starts with this prefix (e.g. fire-seed1 matches all "
+            "fire-seed1* clips, including fire-seed10000_*). Ignored when "
+            "--clip is set."
         ),
     )
     p.add_argument(
@@ -298,8 +311,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--top-p", type=float, default=0.98)
     p.add_argument("--temperature", type=float, default=0.6)
     p.add_argument(
-        "--out-dir", default=str(DEFAULT_OUT_DIR),
-        help="where to save figures/metrics.",
+        "--out-dir", default=None,
+        help=(
+            "where to save figures/metrics. Defaults to "
+            f"{DEFAULT_OUT_DIR} without --clip-prefix, or "
+            f"{DEFAULT_OUT_DIR}/<prefix>_<YYYYmmdd_HHMMSS> in prefix batch "
+            "mode."
+        ),
     )
     p.add_argument(
         "--keep-frames", action="store_true",
@@ -582,15 +600,48 @@ def run_frame(
     print(f"  saved figure -> {fig_path}")
 
 
-def _collect_clips(clip_arg) -> list:
+def _collect_clips(clip_arg, clip_prefix) -> list:
     """Resolve the list of clip stems to process.
 
-    ``clip_arg=None`` means "every .mp4 under
-    DATA_DIR/camera/camera_front_wide_120fov``."
+    Precedence: explicit ``clip_arg`` (a list) > ``clip_prefix`` (every
+    clip under ``DATA_DIR/labels`` whose id starts with it and that has a
+    front-wide mp4) > every .mp4 under
+    ``DATA_DIR/camera/camera_front_wide_120fov``.
     """
     if clip_arg is not None:
-        return [clip_arg]
+        return list(clip_arg)
     front_wide_dir = DATA_DIR / "camera" / WIDE_CAM_NAME
+    if clip_prefix is not None:
+        labels_dir = DATA_DIR / "labels"
+        if not labels_dir.exists():
+            raise FileNotFoundError(
+                f"--clip-prefix set but labels directory not found: {labels_dir}"
+            )
+        clips = sorted(
+            p.stem for p in labels_dir.glob("*.json")
+            if p.stem.startswith(clip_prefix)
+        )
+        if not clips:
+            raise RuntimeError(
+                f"No clips with prefix {clip_prefix!r} under {labels_dir}"
+            )
+        runnable = [c for c in clips if (front_wide_dir / f"{c}.mp4").exists()]
+        skipped = len(clips) - len(runnable)
+        if skipped:
+            print(
+                f"  skipping {skipped}/{len(clips)} clip(s) with prefix "
+                f"{clip_prefix!r} that have no {WIDE_CAM_NAME} mp4"
+            )
+        if not runnable:
+            raise RuntimeError(
+                f"No clip with prefix {clip_prefix!r} has a {WIDE_CAM_NAME} "
+                f"mp4 under {front_wide_dir}"
+            )
+        print(
+            f"--clip-prefix {clip_prefix!r}: running {len(runnable)} clip(s) "
+            f"from {labels_dir}"
+        )
+        return runnable
     if not front_wide_dir.exists():
         raise FileNotFoundError(
             "--clip not set and front-wide camera directory not found: "
@@ -827,13 +878,23 @@ def _run_for_clip(
     _compose_clip_video(clip, out_dir, args.keep_frames)
 
 
+def _resolve_out_dir(args) -> Path:
+    """Explicit --out-dir > timestamped subdir per --clip-prefix > default."""
+    if args.out_dir is not None:
+        return Path(args.out_dir)
+    if args.clip_prefix is not None:
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        return DEFAULT_OUT_DIR / f"{args.clip_prefix}_{stamp}"
+    return DEFAULT_OUT_DIR
+
+
 def main() -> None:
     args = parse_args()
-    out_dir = Path(args.out_dir)
+    out_dir = _resolve_out_dir(args)
     out_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Output directory: {out_dir}")
 
-    # Resolve the clip list (--clip None -> iterate all front-wide clips).
-    clips = _collect_clips(args.clip)
+    clips = _collect_clips(args.clip, args.clip_prefix)
 
     # ---- load model (once) ----------------------------------------------
     print(f"Loading model from {args.ckpt} ...")

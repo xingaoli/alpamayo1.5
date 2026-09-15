@@ -14,27 +14,34 @@ Replicates notebooks/inference_vqa.ipynb as a CLI:
 
 Run with the existing venv (no install needed):
 
-  source /home/xingao/code/Alpamayo/.venv/bin/activate
-  export PYTHONPATH=/home/xingao/code/Alpamayo1.5/src
+  source /home/xingao/code/NVlabs-alpamayo/alpamayo/.venv/bin/activate
+  export PYTHONPATH=/home/xingao/code/NVlabs-alpamayo/alpamayo1.5/src
 
 Common invocations:
 
 1. **Default** (single front wide camera, default question, default
    t0=2.5 s, all clips under
    ``wfm_root/camera/camera_front_wide_120fov``)::
-    PYTHONPATH=/home/xingao/code/Alpamayo1.5/src \
-    python wfm_gen_test/vqa_test/vqa_inference.py \
-    --question "What is happening on the road ahead? Describe the hazards in detail." \
-    --out-dir wfm_gen_test/vqa_test/ar1_5_wfm_outputs/test1
+    PYTHONPATH=src \
+    python wfm_gen_test/vqa_test/vqa_inference.py
 
-2. **Custom question** on a chosen clip with an explicit t0 time::
-    PYTHONPATH=/home/xingao/code/Alpamayo1.5/src \
+2. **Batch by clip-id prefix**: run every clip whose
+   ``labels/<clip_id>.json`` id starts with the prefix (e.g. all
+   ``fire-seed1*`` clips) with one prompt. Outputs default to
+   ``wfm_gen_test/vqa_test/ar1_5_wfm_outputs/<prefix>_<timestamp>/``::
+
+    python wfm_gen_test/vqa_test/vqa_inference.py \
+      --clip-prefix fire-seed1 \
+      --prompt "What is happening on the road ahead? Describe the hazards in detail."
+
+3. **Custom question** on a chosen clip with an explicit t0 time
+   (``--prompt`` is an alias of ``--question``)::
     python wfm_gen_test/vqa_test/vqa_inference.py \
       --clip 71ae0d63-ba64-4517-b3f1-90d446abc67d_1869020100000_1869040100000_fire \
       --t0-seconds 3.0 \
-      --question "What is happening on the road ahead? Describe the hazards in detail."
+      --question "What is happening on the road ahead?"
 
-3. **Multi-camera input** (front wide + cross left + cross right)::
+4. **Multi-camera input** (front wide + cross left + cross right)::
 
     python wfm_gen_test/vqa_test/vqa_inference.py \
       --cameras camera_front_wide_120fov \
@@ -42,27 +49,23 @@ Common invocations:
                 camera_cross_right_120fov \
       --num-frames 4
 
-4. **Different t0 / data root / ckpt** (point at the in-tree data
-   directory and a custom checkpoint)::
+5. **Different t0 / data root / ckpt**::
 
     python wfm_gen_test/vqa_test/vqa_inference.py \
       --wfm-root data/wfm_gen_data \
-      --clip smoke_260616_001 \
       --t0-seconds 1.5 \
       --ckpt /abs/path/to/Alpamayo-1.5-10B
 
-5. **Custom output directory** (writes
+6. **Custom output directory** (writes
    ``/tmp/my_outputs/vqa_result_<clip>.png``)::
 
-    python wfm_gen_test/vqa_test/vqa_inference.py \
-      --out-dir /tmp/my_outputs
+    python wfm_gen_test/vqa_test/vqa_inference.py --out-dir /tmp/my_outputs
 
-6. **Exact output path** (overrides ``--out-dir``)::
+7. **Exact output path** (overrides ``--out-dir``)::
 
-    python wfm_gen_test/vqa_test/vqa_inference.py \
-      --save-image /tmp/qa_snapshot.png
+    python wfm_gen_test/vqa_test/vqa_inference.py --save-image /tmp/qa_snapshot.png
 
-7. **Skip the visualization PNG** (only print the answer)::
+8. **Skip the visualization PNG** (only print the answer)::
 
     python wfm_gen_test/vqa_test/vqa_inference.py --no-visualize
 
@@ -72,7 +75,7 @@ Environment variables (override the defaults; CLI flags take precedence):
   * ``ALPAMAYO_MODEL_CKPT`` -- model checkpoint path (default
     ``<repo>/ckpts/Alpamayo-1.5-10B``).
   * ``WFM_GEN_DATA_DIR`` -- world-model data root (default
-    ``/home/share_files/wfm_gen_data``).
+    ``<repo>/data/wfm_gen_data``).
   * ``ALPAMAYO_PROCESSOR_PATH`` -- Qwen3-VL processor checkpoint; auto-set
     to ``<repo>/ckpts/Qwen3-VL-2B-Instruct`` if that path exists.
 
@@ -81,7 +84,7 @@ Outputs
 The Q/A visualization PNG is written to
 ``wfm_gen_test/vqa_test/ar1_5_wfm_outputs/vqa_result_<clip>.png`` by
 default (mirroring the ``coc_test`` layout). Override the directory
-with ``--out-dir`` or specify an exact path with ``--save-image``.
+with --out-dir or specify an exact path with --save-image.
 """
 
 from __future__ import annotations
@@ -89,20 +92,26 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import sys
+import time
 from pathlib import Path
+
+# ``_SCRIPT_DIR`` is <repo>/wfm_gen_test/vqa_test; the project root is two
+# levels up. Anchoring there keeps the defaults correct regardless of cwd.
+_SCRIPT_DIR = Path(__file__).resolve().parent
+_PROJECT_ROOT = _SCRIPT_DIR.parent.parent
 
 # Resolve the local Qwen3-VL processor checkpoint relative to this file so
 # the script works regardless of cwd. helper.py picks this up via the
 # ALPAMAYO_PROCESSOR_PATH env var.
-_REPO_ROOT = Path(__file__).resolve().parent
-_LOCAL_PROCESSOR = _REPO_ROOT / "ckpts" / "Qwen3-VL-2B-Instruct"
+_LOCAL_PROCESSOR = _PROJECT_ROOT / "ckpts" / "Qwen3-VL-2B-Instruct"
 if _LOCAL_PROCESSOR.exists():
     os.environ.setdefault("ALPAMAYO_PROCESSOR_PATH", str(_LOCAL_PROCESSOR))
 
-# Default output directory for the Q/A visualization PNG, mirroring the
-# ``coc_test`` layout (``wfm_gen_test/coc_test/ar1_5_wfm_outputs``).
-DEFAULT_OUT_DIR = _REPO_ROOT / "ar1_5_wfm_outputs"
+# Default data root and output directory, mirroring the ``coc_test`` layout.
+DEFAULT_WFM_ROOT = Path(
+    os.environ.get("WFM_GEN_DATA_DIR", _PROJECT_ROOT / "data" / "wfm_gen_data")
+)
+DEFAULT_OUT_DIR = _SCRIPT_DIR / "ar1_5_wfm_outputs"
 
 import cv2
 import numpy as np
@@ -427,24 +436,43 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--wfm-root",
         type=Path,
-        default=Path("/home/share_files/wfm_gen_data"),
-        help="Root directory of the locally-generated wfm_gen_data.",
+        default=DEFAULT_WFM_ROOT,
+        help=(
+            "Root directory of the locally-generated wfm_gen_data "
+            "(defaults to WFM_GEN_DATA_DIR or "
+            "<repo>/data/wfm_gen_data)."
+        ),
     )
     parser.add_argument(
         "--clip",
         type=str,
+        nargs="+",
         default=None,
         help=(
-            "Clip name (basename of the mp4 and labels json, no extension). "
-            "If not set, inference runs once on every .mp4 clip found under "
-            "``wfm_root/camera/camera_front_wide_120fov``."
+            "Clip name(s) (basename of the mp4 and labels json, no "
+            "extension). May be given multiple times / space-separated for "
+            "batch runs. If not set, either --clip-prefix or (by default) "
+            "every .mp4 clip found under "
+            "``wfm_root/camera/camera_front_wide_120fov`` is used."
         ),
     )
     parser.add_argument(
-        "--question",
+        "--clip-prefix",
+        type=str,
+        default=None,
+        help=(
+            "Batch mode: run every clip under ``wfm_root/labels`` whose id "
+            "starts with this prefix (e.g. fire-seed1 matches all "
+            "fire-seed1* clips, including fire-seed10000_*). Ignored when "
+            "--clip is set."
+        ),
+    )
+    parser.add_argument(
+        "--question", "--prompt",
+        dest="question",
         type=str,
         default="Describe the scene.",
-        help="Question to ask the model.",
+        help="Question / prompt to ask the model (--prompt is an alias).",
     )
     parser.add_argument(
         "--cameras",
@@ -520,12 +548,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--out-dir",
         type=Path,
-        default=DEFAULT_OUT_DIR,
+        default=None,
         help=(
             "Directory to write the Q/A visualization PNG into (created if "
-            "missing). Defaults to "
-            "``wfm_gen_test/vqa_test/ar1_5_wfm_outputs``, mirroring the "
-            "``coc_test`` layout."
+            "missing). Defaults to ``wfm_gen_test/vqa_test/ar1_5_wfm_outputs`` "
+            "without --clip-prefix, or "
+            "``.../ar1_5_wfm_outputs/<prefix>_<timestamp>`` in prefix batch "
+            "mode."
         ),
     )
     parser.add_argument(
@@ -595,15 +624,48 @@ def _resolve_t0_index(
     return idx
 
 
-def _collect_clips(wfm_root: Path, clip_arg):
+def _collect_clips(wfm_root: Path, clip_arg, clip_prefix):
     """Return the list of clip names to run inference on.
 
-    ``clip_arg=None`` means "iterate every .mp4 under
-    wfm_root/camera/camera_front_wide_120fov``."
+    Precedence: explicit ``clip_arg`` (a list) > ``clip_prefix`` (every
+    clip under ``wfm_root/labels`` whose id starts with it and that has a
+    front-wide mp4) > every .mp4 under
+    ``wfm_root/camera/camera_front_wide_120fov``.
     """
     if clip_arg is not None:
-        return [clip_arg]
+        return list(clip_arg)
     front_wide_dir = wfm_root / "camera" / "camera_front_wide_120fov"
+    if clip_prefix is not None:
+        labels_dir = wfm_root / "labels"
+        if not labels_dir.exists():
+            raise FileNotFoundError(
+                f"--clip-prefix set but labels directory not found: {labels_dir}"
+            )
+        clips = sorted(
+            p.stem for p in labels_dir.glob("*.json")
+            if p.stem.startswith(clip_prefix)
+        )
+        if not clips:
+            raise RuntimeError(
+                f"No clips with prefix {clip_prefix!r} under {labels_dir}"
+            )
+        runnable = [c for c in clips if (front_wide_dir / f"{c}.mp4").exists()]
+        skipped = len(clips) - len(runnable)
+        if skipped:
+            print(
+                f"[vqa] skipping {skipped}/{len(clips)} clip(s) with prefix "
+                f"{clip_prefix!r} that have no front-wide mp4"
+            )
+        if not runnable:
+            raise RuntimeError(
+                f"No clip with prefix {clip_prefix!r} has a front-wide mp4 "
+                f"under {front_wide_dir}"
+            )
+        print(
+            f"[vqa] --clip-prefix {clip_prefix!r}: running {len(runnable)} "
+            f"clip(s) from {labels_dir}"
+        )
+        return runnable
     if not front_wide_dir.exists():
         raise FileNotFoundError(
             "--clip not set and front-wide camera directory not found: "
@@ -689,13 +751,25 @@ def _run_inference_for_clip(
         print(f"[vqa] Saved Q/A visualization to {out_path}")
 
 
+def _resolve_out_dir(args) -> Path:
+    """Explicit --out-dir > timestamped subdir per --clip-prefix > default."""
+    if args.out_dir is not None:
+        return args.out_dir
+    if args.clip_prefix is not None:
+        return DEFAULT_OUT_DIR / f"{args.clip_prefix}_{time.strftime('%Y%m%d_%H%M%S')}"
+    return DEFAULT_OUT_DIR
+
+
 def main() -> None:
     args = parse_args()
 
     if not args.wfm_root.exists():
         raise FileNotFoundError(f"wfm_root does not exist: {args.wfm_root}")
 
-    clips = _collect_clips(args.wfm_root, args.clip)
+    args.out_dir = _resolve_out_dir(args)
+    print(f"[vqa] Output directory: {args.out_dir}")
+
+    clips = _collect_clips(args.wfm_root, args.clip, args.clip_prefix)
 
     print(f"[vqa] Loading model from {args.ckpt}...")
     model = Alpamayo1_5.from_pretrained(args.ckpt, dtype=torch.bfloat16).to("cuda")

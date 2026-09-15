@@ -58,17 +58,30 @@ def _fit_inverse_poly(th2r_or_r2th: P.Polynomial, mode: str, r_max: float,
 
 
 def _build_intrinsics(v: Sequence, target_w: int | None = None,
-                      target_h: int | None = None) -> dict:
-    """Build both f-theta polynomial directions from a single intrinsics vector.
+                      target_h: int | None = None,
+                      types: str | None = None) -> dict:
+    """Build intrinsics from either f-theta or pinhole parameter vector.
 
-    ``v`` is ``[cx, cy, w, h, *poly_6, is_bw_poly]`` (see module docstring).
+    ``v`` is one of:
+      * f-theta (wfm_gen_data): ``[cx, cy, w, h, *poly_6, is_bw_poly]`` (11 elems)
+      * pinhole (waymo)      : ``[fx, fy, cx, cy, w, h]`` (6 elems)
 
-    If ``target_w``/``target_h`` are given and differ from the native (w, h),
-    the model is rescaled to that image size: cx, cy and the radius polynomial
-    coefficients are scaled by ``sx = target_w / w``, ``sy = target_h / h``.
-    f-theta keeps pixel aspect square at the native resolution, so we scale
-    isotropically by the average factor and re-fit the inverse polynomial.
+    If ``types`` is given (e.g. ``'pinhole'`` / ``'f-theta'``), it picks the
+    branch explicitly; otherwise the branch is auto-detected from the vector
+    length.
+
+    For pinhole, ``target_w``/``target_h`` are a no-op (the model just scales
+    the principal point) because pinhole intrinsics are linear in pixel space.
     """
+    types = (types or "").lower() or None
+    if types == "pinhole" or (types is None and len(v) == 6):
+        return _build_pinhole_intrinsics(v, target_w, target_h)
+    return _build_ftheta_intrinsics(v, target_w, target_h)
+
+
+def _build_ftheta_intrinsics(v: Sequence, target_w: int | None,
+                             target_h: int | None) -> dict:
+    """F-theta polynomial intrinsics (wfm_gen_data)."""
     cx, cy, w, h = v[0], v[1], v[2], v[3]
     poly = np.array(v[4:10], dtype=float)
     is_bw = bool(v[10])
@@ -103,6 +116,22 @@ def _build_intrinsics(v: Sequence, target_w: int | None = None,
             "scale": scale}
 
 
+def _build_pinhole_intrinsics(v: Sequence, target_w: int | None,
+                              target_h: int | None) -> dict:
+    """Pinhole intrinsics (waymo). ``v = [fx, fy, cx, cy, w, h]``."""
+    fx, fy, cx, cy, w, h = v
+    scale = 1.0
+    if target_w is not None and target_h is not None:
+        scale = (target_w / w + target_h / h) / 2.0
+        cx *= target_w / w
+        cy *= target_h / h
+        w, h = int(target_w), int(target_h)
+        fx *= target_w / v[4] if v[4] else 1.0
+        fy *= target_h / v[5] if v[5] else 1.0
+    return {"pinhole": True, "fx": fx, "fy": fy, "cx": cx, "cy": cy,
+            "w": int(w), "h": int(h), "scale": scale}
+
+
 def load_intrinsics_for_clip(data_root, clip: str, camera: str,
                              target_w: int | None = None,
                              target_h: int | None = None) -> dict:
@@ -118,7 +147,9 @@ def load_intrinsics_for_clip(data_root, clip: str, camera: str,
     data_root = Path(data_root)
     data = json.loads((data_root / "calibration/camera_intrinsics" /
                        f"{clip}.json").read_text())
-    return _build_intrinsics(data["intrinsics"][camera], target_w, target_h)
+    types = data.get("types")
+    return _build_intrinsics(data["intrinsics"][camera], target_w, target_h,
+                             types=types)
 
 
 def load_extrinsics(data_root, clip: str) -> dict[str, np.ndarray]:
@@ -174,30 +205,20 @@ def ftheta_ray2pixel(P_cam: np.ndarray, th2r: P.Polynomial,
     return pix, valid
 
 
-def project_ego_world_to_pixels(
-    P_world: np.ndarray,
-    ego_poses: np.ndarray,
-    frame_idx: int,
-    ego_to_cam: np.ndarray,
-    intrinsics: dict,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Full chain for projecting world-frame points through the camera at ``frame_idx``.
+def pinhole_project(P_cam: np.ndarray, fx: float, fy: float,
+                    cx: float, cy: float) -> tuple[np.ndarray, np.ndarray]:
+    """Project camera-frame 3D points to pinhole pixel coords.
 
-    ``P_world`` is ``[N, 3]`` of points expressed in world_0 (= ego_0) frame.
-    ``ego_poses`` is ``[T, 4, 4]`` (labels). ``ego_to_cam`` is the static 4x4.
-
-    Returns ``(pixels [N, 2], valid [N])``.
+    Returns ``(pixels [N, 2], valid [N])``. ``valid`` is False for points with
+    z <= 0 (behind the camera).
     """
-    # 1) world -> ego_t0
-    t0 = ego_poses[frame_idx]
-    R_inv = t0[:3, :3].T
-    P_ego_t0 = (R_inv @ (P_world - t0[:3, 3]).T).T
-
-    # 2) ego_t0 -> cam_t0 (static)
-    P_cam = project_ego_to_camera(P_ego_t0, ego_to_cam)
-
-    # 3) f-theta
-    return ftheta_ray2pixel(P_cam, intrinsics["th2r"], intrinsics["cx"], intrinsics["cy"])
+    z = P_cam[:, 2]
+    valid = z > 1e-9
+    z_safe = np.where(valid, z, 1.0)
+    u = cx + fx * P_cam[:, 0] / z_safe
+    v = cy + fy * P_cam[:, 1] / z_safe
+    pix = np.stack([u, v], axis=1)
+    return pix, valid
 
 
 def project_ego_local_to_pixels(
@@ -211,6 +232,9 @@ def project_ego_local_to_pixels(
     ego frame, so we skip the world transform step.
     """
     P_cam = project_ego_to_camera(P_ego_local, ego_to_cam)
+    if intrinsics.get("pinhole"):
+        return pinhole_project(P_cam, intrinsics["fx"], intrinsics["fy"],
+                               intrinsics["cx"], intrinsics["cy"])
     return ftheta_ray2pixel(P_cam, intrinsics["th2r"], intrinsics["cx"], intrinsics["cy"])
 
 
