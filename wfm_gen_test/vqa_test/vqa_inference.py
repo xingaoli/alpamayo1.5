@@ -76,8 +76,8 @@ Environment variables (override the defaults; CLI flags take precedence):
     ``<repo>/ckpts/Alpamayo-1.5-10B``).
   * ``WFM_GEN_DATA_DIR`` -- world-model data root (default
     ``<repo>/data/wfm_gen_data``).
-  * ``ALPAMAYO_PROCESSOR_PATH`` -- Qwen3-VL processor checkpoint; auto-set
-    to ``<repo>/ckpts/Qwen3-VL-2B-Instruct`` if that path exists.
+  * ``ALPAMAYO_VLM_PROCESSOR_CKPT`` -- Qwen3-VL processor checkpoint
+    (default ``<repo>/ckpts/Qwen3-VL-8B-Instruct-config``, see helper.py).
 
 Outputs
 -------
@@ -100,12 +100,6 @@ from pathlib import Path
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _PROJECT_ROOT = _SCRIPT_DIR.parent.parent
 
-# Resolve the local Qwen3-VL processor checkpoint relative to this file so
-# the script works regardless of cwd. helper.py picks this up via the
-# ALPAMAYO_PROCESSOR_PATH env var.
-_LOCAL_PROCESSOR = _PROJECT_ROOT / "ckpts" / "Qwen3-VL-2B-Instruct"
-if _LOCAL_PROCESSOR.exists():
-    os.environ.setdefault("ALPAMAYO_PROCESSOR_PATH", str(_LOCAL_PROCESSOR))
 
 # Default data root and output directory, mirroring the ``coc_test`` layout.
 DEFAULT_WFM_ROOT = Path(
