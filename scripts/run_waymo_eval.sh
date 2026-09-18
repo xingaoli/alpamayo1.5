@@ -4,15 +4,19 @@ set -euo pipefail
 # Waymo rds_hq trajectory eval runner (mADE/mFDE/ADE/FDE @1s/3s/5s/full).
 #
 # Usage:
-#   bash scripts/run_waymo_eval.sh              # full val split (~2424 samples, ~1.2h)
+#   bash scripts/run_waymo_eval.sh              # full val split, 4 GPUs x bs 4
 #   bash scripts/run_waymo_eval.sh 20           # first 20 clips (small batch)
 #   bash scripts/run_waymo_eval.sh 20 --num-traj-samples 3
-#   bash scripts/run_waymo_eval.sh -- --split train --num-traj-samples 3
+#   NPROC=8 BATCH_SIZE=8 bash scripts/run_waymo_eval.sh   # custom parallelism
 #
 # Optional positional arg: number of clips to evaluate (maps to --max-clips).
-# Everything after it is passed through to waymo_eval/eval_traj.py.
-# Output: waymo_eval/eval_outputs/<split>_<tag>/ (per_frame.csv, summary.json,
-# preds.npz) with a run.log. Visualize afterwards with scripts/run_waymo_viz.sh.
+# Everything after it is passed through to waymo_eval/eval_traj.py
+# (including --batch-size, which overrides BATCH_SIZE).
+# NPROC (default 4) = torchrun processes/GPUs; BATCH_SIZE (default 4) =
+# samples per GPU forward. Output: waymo_eval/eval_outputs/<split>_<tag>/
+# (per_frame.csv, summary.json, preds.npz) with a run.log. preds.npz is the
+# source of truth for offline metric recompute (compute_metrics.py).
+# Visualize afterwards with scripts/run_waymo_viz.sh.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -25,7 +29,13 @@ if [ ! -d "$VENV_DIR" ]; then
 fi
 PY="$VENV_DIR/bin/python"
 
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+# Multi-process (torchrun) uses all visible GPUs unless CUDA_VISIBLE_DEVICES
+# is already set; single-process defaults to GPU 0.
+NPROC="${NPROC:-4}"
+BATCH_SIZE="${BATCH_SIZE:-4}"
+if [ "$NPROC" -le 1 ] && [ -z "${CUDA_VISIBLE_DEVICES:-}" ]; then
+    export CUDA_VISIBLE_DEVICES=0
+fi
 
 # --- parse: [N_CLIPS] [extra args...] ---
 N_CLIPS=""
@@ -68,13 +78,21 @@ fi
 mkdir -p "$FINAL_OUT"
 LOG="$FINAL_OUT/run.log"
 
-echo "[eval] split=${SPLIT} clips=$([ -n "$N_CLIPS" ] && echo "$N_CLIPS" || echo all)"
+echo "[eval] split=${SPLIT} clips=$([ -n "$N_CLIPS" ] && echo "$N_CLIPS" || echo all) nproc=${NPROC} batch_size=${BATCH_SIZE}"
 echo "[eval] out_dir=${FINAL_OUT}"
 if [ ${#EXTRA[@]} -gt 0 ]; then
     echo "[eval] extra args: ${EXTRA[*]}"
 fi
 
-"$PY" waymo_eval/eval_traj.py --split "$SPLIT" "${ARGS[@]}" "${EXTRA[@]}" 2>&1 | tee "$LOG"
+if [ "$NPROC" -gt 1 ]; then
+    echo "[eval] launching $NPROC processes via torchrun"
+    "$PY" -m torch.distributed.run --standalone --nproc_per_node="$NPROC" \
+        waymo_eval/eval_traj.py --split "$SPLIT" --batch-size "$BATCH_SIZE" \
+        "${ARGS[@]}" "${EXTRA[@]}" 2>&1 | tee "$LOG"
+else
+    "$PY" waymo_eval/eval_traj.py --split "$SPLIT" --batch-size "$BATCH_SIZE" \
+        "${ARGS[@]}" "${EXTRA[@]}" 2>&1 | tee "$LOG"
+fi
 
 echo
 echo "[eval] done. summary: ${FINAL_OUT}/summary.json"
