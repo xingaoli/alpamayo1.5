@@ -62,6 +62,11 @@ DEFAULT_CKPT = os.environ.get(
     "ALPAMAYO_MODEL_CKPT", str(_REPO_ROOT / "ckpts" / "Alpamayo-1.5-10B"))
 DT = 0.1
 
+# BEV panel view (t0-local vehicle frame): forward x, lateral y (left+).
+# The axes box aspect is derived from these spans so the panel is filled.
+BEV_FORWARD = (-10, 70)
+BEV_LATERAL = (-25, 25)
+FRONT_DISP_SCALE = 0.75   # front view displayed at 75% of its pixel size
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Visualize waymo predictions (rds_hq).")
@@ -89,6 +94,106 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--video", action="store_true",
                    help="compose rendered PNGs into an mp4 (with --all-segments)")
     return p.parse_args()
+
+
+def draw_bev_context(ax, clip: RDSWaymoClip, t0_us: int, t0_pose: np.ndarray,
+                     view: tuple[float, float, float, float] | None = None):
+    """Draw 3d map features + other agents on a t0-local BEV axis.
+
+    Map polylines / object boxes come from the rds dataset in world frame;
+    they are transformed into the same t0-local *vehicle* frame the
+    trajectories live in, then rotated like the trajectories
+    (``rotate_90cc``: plot-x = -y_local, plot-y = x_local).
+    ``view`` = (x_min, x_max, y_min, y_max) local-frame culling box.
+    """
+    import matplotlib.patches as mpatches
+
+    R, t = t0_pose[:3, :3], t0_pose[:3, 3]
+
+    def to_local(pts_w: np.ndarray) -> np.ndarray:
+        return (R.T @ (pts_w - t).T).T
+
+    if view is None:
+        # cull slightly beyond the BEV axes so lines reach the panel edge
+        view = (BEV_FORWARD[0] - 3, BEV_FORWARD[1] + 3,
+                BEV_LATERAL[0] - 3, BEV_LATERAL[1] + 3)
+    x0, x1, y0, y1 = view
+    def in_view(p: np.ndarray) -> np.ndarray:
+        return ((p[:, 0] > x0) & (p[:, 0] < x1)
+                & (p[:, 1] > y0) & (p[:, 1] < y1))
+
+    def plot_polyline_runs(vertices_w: np.ndarray, style, **kw):
+        """Plot only the in-view runs of a long world polyline (no jump
+        lines across out-of-view gaps)."""
+        p = to_local(vertices_w)
+        m = in_view(p)
+        if not m.any():
+            return
+        # extend each run by one out-of-view neighbour so lines reach the
+        # axis edge instead of stopping mid-air
+        m_ext = m.copy()
+        m_ext[:-1] |= m[1:]
+        m_ext[1:] |= m[:-1]
+        runs, cur = [], []
+        for k in range(len(p)):
+            if m_ext[k]:
+                cur.append(p[k, :2])
+            elif cur:
+                runs.append(cur)
+                cur = []
+        if cur:
+            runs.append(cur)
+        for run in runs:
+            xy = rotate_90cc(np.asarray(run))
+            ax.plot(xy[:, 0], xy[:, 1], **kw)
+
+    # ---- map features (static, world frame) ----
+    for kind, color, lw, style in (
+            ("3d_road_boundaries", "#ff595e", 2.0, "-"),
+            ("3d_lanelines", "#e8e8e8", 1.4, "-"),
+            ("3d_lanes", "#ffd166", 1.4, (0, (5, 3)))):
+        labels = clip.map_features(kind).get("labels", [])
+        for lab in labels:
+            verts = (lab.get("labelData", {}).get("shape3d", {})
+                     .get("polyline3d", {}).get("vertices"))
+            if not verts:
+                continue
+            plot_polyline_runs(np.asarray(verts, dtype=np.float64),
+                               style, color=color, lw=lw, alpha=0.85, zorder=1)
+
+    for lab in clip.map_features("3d_crosswalks").get("labels", []):
+        verts = (lab.get("labelData", {}).get("shape3d", {})
+                 .get("surface", {}).get("vertices"))
+        if not verts:
+            continue
+        p = to_local(np.asarray(verts, dtype=np.float64))
+        if not in_view(p).any():
+            continue
+        xy = rotate_90cc(p[:, :2])
+        ax.fill(xy[:, 0], xy[:, 1], color="#4cc9f0", alpha=0.25, zorder=1)
+
+    # ---- other agents at t0 (nearest keyframe) ----
+    agent_colors = {"Car": "#ff9f1c", "Pedestrian": "#ef476f",
+                    "Cyclist": "#b388eb"}
+    for obj in clip.object_info_at(t0_us).values():
+        T = np.asarray(obj["object_to_world"], dtype=np.float64)
+        pos = to_local(T[:3, 3][None])[0]
+        if not (x0 < pos[0] < x1 and y0 < pos[1] < y1):
+            continue
+        R_loc = R.T @ T[:3, :3]
+        yaw = np.arctan2(R_loc[1, 0], R_loc[0, 0])
+        hl, hw = (float(v) / 2 for v in obj["object_lwh"][:2])
+        c, s = np.cos(yaw), np.sin(yaw)
+        corners = pos[:2] + np.array(
+            [[c * hl - s * hw, s * hl + c * hw],
+             [-c * hl - s * hw, -s * hl + c * hw],
+             [-c * hl + s * hw, -s * hl - c * hw],
+             [c * hl + s * hw, s * hl - c * hw]])
+        xy = rotate_90cc(corners)
+        col = agent_colors.get(obj.get("object_type", ""), "#9aa0a6")
+        ax.add_patch(mpatches.Polygon(
+            xy, closed=True, facecolor=col, edgecolor=col,
+            alpha=0.55, linewidth=1.5, zorder=2))
 
 
 def rotate_90cc(xy: np.ndarray) -> np.ndarray:
@@ -187,18 +292,17 @@ def render_sample(clip: RDSWaymoClip, t0_us: int, pred: np.ndarray,
     cv2.line(big, (int(intr["cx"] * SCALE) - 20, int(intr["cy"] * SCALE)),
              (int(intr["cx"] * SCALE) + 20, int(intr["cy"] * SCALE)),
              (200, 200, 200), 1)
-    cv2.putText(big, f"t0 = {t0_s:.1f}s", (20, big.shape[0] - 18),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7 * SCALE, (255, 255, 255),
-                2 * SCALE, cv2.LINE_AA)
-
     # ---------------- matplotlib composite ----------------
     dpi = 100
     img_h, img_w = big.shape[:2]
-    img_w_in, img_h_in = img_w / dpi, img_h / dpi
+    img_w_in = img_w / dpi * FRONT_DISP_SCALE
+    img_h_in = img_h / dpi * FRONT_DISP_SCALE
     title_h, cot_h, suptitle_h, margin = 0.90, 1.40, 0.90, 0.15
     left_h = img_h_in + title_h + cot_h
     right_h = img_h_in + title_h
-    right_w = right_h / 2.5
+    bev_aspect = ((BEV_LATERAL[1] - BEV_LATERAL[0])
+                  / (BEV_FORWARD[1] - BEV_FORWARD[0]))
+    right_w = right_h * bev_aspect
     gap = 0.80
     fig_w = margin + img_w_in + gap + right_w + margin
     fig_h = margin + suptitle_h + max(left_h, right_h) + margin
@@ -220,6 +324,7 @@ def render_sample(clip: RDSWaymoClip, t0_us: int, pred: np.ndarray,
     ax_trj = fig.add_axes([(margin + img_w_in + gap) / fig_w,
                            (margin + cot_h) / fig_h,
                            right_w / fig_w, img_h_in / fig_h])
+    draw_bev_context(ax_trj, clip, t0_us, t0_pose)
     gt_rot = rotate_90cc(gt[:, :2])
     ax_trj.plot(gt_rot[:, 0], gt_rot[:, 1], "g-o", ms=3, label="GT future")
     for s in range(pred.shape[0]):
@@ -234,11 +339,21 @@ def render_sample(clip: RDSWaymoClip, t0_us: int, pred: np.ndarray,
     ax_trj.set_aspect("equal")
     ax_trj.set_xlabel("y (left) [m]", fontsize=28)
     ax_trj.set_ylabel("x (forward) [m]", fontsize=28)
-    ax_trj.set_xlim(-15, 15)
-    ax_trj.set_ylim(-5, 60)
+    ax_trj.set_xlim(-BEV_LATERAL[1], -BEV_LATERAL[0])
+    ax_trj.set_ylim(*BEV_FORWARD)
     ax_trj.set_title("BEV trajectory", fontsize=36, pad=6)
     ax_trj.grid(True, alpha=0.3)
-    ax_trj.legend(fontsize=28, loc="upper right")
+    import matplotlib.lines as mlines
+    proxies = [
+        mlines.Line2D([], [], color="#ff595e", lw=2, label="road bnd"),
+        mlines.Line2D([], [], color="#ffd166", lw=1.4, ls=(0, (5, 3)),
+                      label="lanes"),
+        mlines.Line2D([], [], color="#ff9f1c", marker="s", ls="", ms=10,
+                      label="agents"),
+    ]
+    handles, labels = ax_trj.get_legend_handles_labels()
+    ax_trj.legend(handles + proxies, labels + [p.get_label() for p in proxies],
+                  fontsize=20, loc="upper right", ncol=2)
 
     fig.suptitle(f"{clip.clip_id}  @  t0 = {t0_s:.1f}s", fontsize=36,
                  y=(fig_h - margin - suptitle_h / 2) / fig_h)

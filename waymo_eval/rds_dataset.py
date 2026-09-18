@@ -125,6 +125,9 @@ class RDSWaymoClip:
 
         t_sec = self.ts_us.astype(np.float64) * 1e-6
         self._slerp = Slerp(t_sec, Rotation.from_matrix(poses[:, :3, :3]))
+        # --- caches for repeated per-render reads (map features, objects) ---
+        self._map_cache: dict[str, dict] = {}
+        self._obj_tar_cache: dict[str, bytes] | None = None
 
         # --- videos ---
         self._videos: dict[str, np.ndarray | cv2.VideoCapture] = {}
@@ -240,12 +243,13 @@ class RDSWaymoClip:
         c = self.cam_pose_at(cam, ts_us)
         return np.linalg.inv(c) @ v
 
-    # ------------------------------------------------- collision-eval streams
     def object_info_at(self, ts_us: int) -> dict:
         import json
-        raw = _read_tar_members(
-            self.root / self.split / "all_object_info" / f"{self.clip_id}.tar",
-            suffix_filter=".all_object_info.json")
+        if self._obj_tar_cache is None:
+            self._obj_tar_cache = _read_tar_members(
+                self.root / self.split / "all_object_info" / f"{self.clip_id}.tar",
+                suffix_filter=".all_object_info.json")
+        raw = self._obj_tar_cache
         idx = self.keyframe_idx[self.keyframe_index_at(ts_us)]
         key = f"{self.clip_id}.{idx:06d}.all_object_info.json"
         if key not in raw:
@@ -254,11 +258,13 @@ class RDSWaymoClip:
 
     def map_features(self, kind: str) -> dict:
         """``kind`` in {3d_lanelines, 3d_lanes, 3d_crosswalks, 3d_road_boundaries}."""
+        if kind in self._map_cache:
+            return self._map_cache[kind]
         import json
         raw = _read_tar_members(self.root / self.split / kind / f"{self.clip_id}.tar")
-        if not raw:
-            return {}
-        return json.loads(next(iter(raw.values())))
+        out = json.loads(next(iter(raw.values()))) if raw else {}
+        self._map_cache[kind] = out
+        return out
 
     # ------------------------------------------------------------------ samples
     def segment_t0s(self, num_segments: int = 20, segment_start_us: int = 2_000_000,
@@ -376,7 +382,10 @@ class RDSWaymoDataset(torch.utils.data.Dataset):
         self.index: list[tuple[str, int]] = []
         for cid in clips:
             try:
-                clip = self._get_clip(cid)
+                # metadata-only (timestamps + poses): no video decode here.
+                # Preloading every clip just to compute t0s would decode the
+                # whole split's videos up front.
+                clip = RDSWaymoClip(self.root, self.split, cid, preload=False)
                 t0s = clip.segment_t0s(
                     num_segments, segment_start_us, segment_step_us,
                     num_history_steps, num_future_steps, time_step)
