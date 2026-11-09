@@ -48,12 +48,20 @@ from scipy.spatial.transform import Rotation, Slerp
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # (rds camera stream name, model camera index) — must stay sorted by model idx.
-CAMERA_SLOTS: tuple[tuple[str, int], ...] = (
-    ("pinhole_front_left", 0),   # PAI cross_left slot
-    ("pinhole_front", 1),        # PAI front_wide slot
-    ("pinhole_front_right", 2),  # PAI cross_right slot
-    ("pinhole_front", 6),        # PAI front_tele slot (filled from front)
+CAMERA_SLOTS_4CAM: tuple[tuple[str, int], ...] = (
+    ("pinhole_front_left", 0),  # PAI cross_left slot
+    ("pinhole_front", 1),       # PAI front_wide slot
+    ("pinhole_front_right", 2), # PAI cross_right slot
+    ("pinhole_front", 6),       # PAI front_tele slot (filled from front)
 )
+# front_wide + front_tele only: models trained with ALPAMAYO_CAMERA_MODE=2cam
+# in the alpamayo repo (e.g. the 2B from-scratch line).
+CAMERA_SLOTS_2CAM: tuple[tuple[str, int], ...] = (
+    ("pinhole_front", 1),       # PAI front_wide slot
+    ("pinhole_front", 6),       # PAI front_tele slot (filled from front)
+)
+CAMERA_SLOTS = CAMERA_SLOTS_4CAM  # default view set
+CAMERA_MODES = {"4cam": CAMERA_SLOTS_4CAM, "2cam": CAMERA_SLOTS_2CAM}
 FRONT_CAM = "pinhole_front"
 
 
@@ -82,11 +90,13 @@ def _member_idx(name: str, seg: str) -> int:
 class RDSWaymoClip:
     """Lazy per-segment reader for one rds_hq clip."""
 
-    def __init__(self, root: Path, split: str, clip_id: str, preload: bool = True):
+    def __init__(self, root: Path, split: str, clip_id: str, preload: bool = True,
+                 camera_mode: str = "4cam"):
         self.root = Path(root)
         self.split = split
         self.clip_id = clip_id
         self.preload = preload
+        self.camera_slots = CAMERA_MODES[camera_mode]
 
         # --- timestamps (canonical 10Hz keyframe grid) ---
         ts_raw = _read_tar_members(
@@ -132,7 +142,7 @@ class RDSWaymoClip:
         # --- videos ---
         self._videos: dict[str, np.ndarray | cv2.VideoCapture] = {}
         if preload:
-            for cam in {c for c, _ in CAMERA_SLOTS}:
+            for cam in {c for c, _ in self.camera_slots}:
                 self._videos[cam] = self._decode_video(cam)
 
     # ------------------------------------------------------------------ videos
@@ -314,7 +324,7 @@ class RDSWaymoClip:
         img_idx = np.asarray([self.keyframe_index_at(t) for t in img_ts])
 
         frames_list, cam_idx_list, ts_list = [], [], []
-        for cam, model_idx in CAMERA_SLOTS:
+        for cam, model_idx in self.camera_slots:
             frames = self.decode_frames(cam, img_idx)  # [T,H,W,3]
             ft = torch.from_numpy(frames).permute(0, 3, 1, 2).contiguous()
             frames_list.append(ft)
@@ -353,7 +363,7 @@ class RDSWaymoDataset(torch.utils.data.Dataset):
                  num_history_steps: int = 16, num_future_steps: int = 64,
                  time_step: float = 0.1, num_frames: int = 4,
                  preload: bool = True, max_clips: int | None = None,
-                 clip_stride: int = 1):
+                 clip_stride: int = 1, camera_mode: str = "4cam"):
         self.root = Path(root) if root is not None else Path(os.environ.get(
             "RDS_WAYMO_ROOT", _REPO_ROOT / "data" / "waymo_rds_hq"))
         self.split = split
@@ -365,6 +375,7 @@ class RDSWaymoDataset(torch.utils.data.Dataset):
         self.time_step = time_step
         self.num_frames = num_frames
         self.preload = preload
+        self.camera_mode = camera_mode
 
         clips = sorted(p.stem for p in (self.root / split / FRONT_CAM).glob("*.mp4"))
         if clip_ids is not None:
@@ -399,7 +410,8 @@ class RDSWaymoDataset(torch.utils.data.Dataset):
             if len(self._clip_cache) >= 2:  # keep at most 2 decoded clips alive
                 self._clip_cache.clear()
             self._clip_cache[clip_id] = RDSWaymoClip(
-                self.root, self.split, clip_id, preload=self.preload)
+                self.root, self.split, clip_id, preload=self.preload,
+                camera_mode=self.camera_mode)
         return self._clip_cache[clip_id]
 
     def __len__(self) -> int:

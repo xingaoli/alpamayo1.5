@@ -68,10 +68,38 @@ DEFAULT_CKPT = os.environ.get(
 DEFAULT_HORIZONS_S = (1.0, 3.0, 5.0)
 
 
+def create_traj_only_message(frames) -> list[dict]:
+    """No-CoT prompt of the alpamayo-repo stage-2 models (e.g. Alpamayo-2B):
+    user asks only for the trajectory, assistant is prefilled with
+    <|traj_future_start|> so the model emits discrete traj tokens directly
+    (mirrors alpamayo_r1 chat_template with components_prompt=[traj_future])."""
+    hist = (f"<|traj_history_start|>{'<|traj_history|>' * 48}"
+            "<|traj_history_end|>")
+    return [
+        {"role": "system", "content": [{"type": "text", "text":
+            "You are a driving assistant that generates safe and accurate actions."}]},
+        {"role": "user", "content":
+            [{"type": "image", "image": f} for f in frames]
+            + [{"type": "text", "text": f"{hist}output the future trajectory."}]},
+        {"role": "assistant", "content": [
+            {"type": "text", "text": "<|traj_future_start|>"}]},
+    ]
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Quantitative waymo trajectory eval.")
     p.add_argument("--split", default="val", choices=["train", "val"])
     p.add_argument("--ckpt", default=DEFAULT_CKPT)
+    p.add_argument("--camera-mode", default="4cam", choices=["4cam", "2cam"],
+                   help="camera views fed to the model: 4cam = the 1.5 "
+                        "release slots (left/front/right/tele); 2cam = "
+                        "front_wide + front_tele (alpamayo-repo 2B training)")
+    p.add_argument("--prompt-format", default=None, choices=["cot", "traj_only"],
+                   help="assistant prefill: 'cot' = <|cot_start|> after asking "
+                        "for CoT (1.5 release models); 'traj_only' = "
+                        "<|traj_future_start|> (alpamayo-repo stage-2 models). "
+                        "Default: read 'prompt_format' from the checkpoint "
+                        "config, else 'cot'.")
     p.add_argument("--root", default=None, help="rds_hq root (default: data/waymo_rds_hq)")
     p.add_argument("--clip-ids", default=None,
                    help="comma-separated clip ids to evaluate (default: all in split)")
@@ -126,12 +154,26 @@ def frame_metrics(pred: np.ndarray, gt: np.ndarray,
         out[f"mFDE@{name}"] = float(fde_s.min())
     return out
 
-def prepare_sample(dataset: RDSWaymoDataset, processor, i: int) -> dict:
-    """Build one sample's processor inputs (CPU). Raises on a bad sample."""
+def prepare_sample(dataset: RDSWaymoDataset, processor, i: int,
+                   annotate_cameras: bool = True,
+                   prompt_format: str = "cot") -> dict:
+    """Build one sample's processor inputs (CPU). Raises on a bad sample.
+
+    ``annotate_cameras``: prepend camera display names / frame numbers to
+    each image (1.5 release models were trained with them; models converted
+    from the alpamayo repo set include_camera_ids/include_frame_nums=false
+    in their config and were trained on bare images).
+    ``prompt_format``: "cot" (helper.create_message) or "traj_only"
+    (create_traj_only_message, no camera annotations).
+    """
     sample = dataset[i]
-    messages = helper.create_message(
-        frames=sample["image_frames"].flatten(0, 1),
-        camera_indices=sample["camera_indices"])
+    if prompt_format == "traj_only":
+        messages = create_traj_only_message(
+            frames=sample["image_frames"].flatten(0, 1))
+    else:
+        messages = helper.create_message(
+            frames=sample["image_frames"].flatten(0, 1),
+            camera_indices=sample["camera_indices"] if annotate_cameras else None)
     inputs = processor.apply_chat_template(
         messages, tokenize=True, add_generation_prompt=False,
         continue_final_message=True, return_dict=True, return_tensors="pt")
@@ -189,10 +231,13 @@ class _PreparedShardDataset(torch.utils.data.Dataset):
     pickling; workers never touch CUDA.
     """
 
-    def __init__(self, dataset: RDSWaymoDataset, processor, indices: list[int]):
+    def __init__(self, dataset: RDSWaymoDataset, processor, indices: list[int],
+                 annotate_cameras: bool = True, prompt_format: str = "cot"):
         self.dataset = dataset
         self.processor = processor
         self.indices = indices
+        self.annotate_cameras = annotate_cameras
+        self.prompt_format = prompt_format
 
     def __len__(self) -> int:
         return len(self.indices)
@@ -200,7 +245,9 @@ class _PreparedShardDataset(torch.utils.data.Dataset):
     def __getitem__(self, j: int):
         i = self.indices[j]
         try:
-            return i, prepare_sample(self.dataset, self.processor, i), None
+            return i, prepare_sample(self.dataset, self.processor, i,
+                                     self.annotate_cameras,
+                                     self.prompt_format), None
         except Exception as exc:
             clip_id, t0_us = self.dataset.index[i]
             return i, None, f"{clip_id} t0={t0_us}: {exc}"
@@ -242,7 +289,8 @@ def main():
         segment_start_us=args.segment_start_us,
         segment_step_us=args.segment_step_us,
         max_clips=args.max_clips, clip_stride=args.clip_stride,
-        preload=False)  # lazy VideoCapture seek; preloading decodes whole clips
+        preload=False,  # lazy VideoCapture seek; preloading decodes whole clips
+        camera_mode=args.camera_mode)
     if is_main:
         print(f"dataset: split={args.split} clips={len(dataset.clip_ids)} "
               f"samples={len(dataset)} world_size={world_size}")
@@ -251,6 +299,13 @@ def main():
         print(f"Loading model from {args.ckpt} ...")
     model = Alpamayo1_5.from_pretrained(args.ckpt, dtype=torch.bfloat16).to(device)
     model.eval()
+    annotate_cameras = bool(getattr(model.config, "include_camera_ids", False)
+                            or getattr(model.config, "include_frame_nums", False))
+    prompt_format = args.prompt_format or getattr(
+        model.config, "prompt_format", None) or "cot"
+    if is_main:
+        print(f"prompt camera annotations (names/frame nums): {annotate_cameras}")
+        print(f"prompt format: {prompt_format}; camera mode: {args.camera_mode}")
     processor = helper.get_processor(model.tokenizer)
 
     rows: list[dict] = []
@@ -267,7 +322,8 @@ def main():
     bs = max(1, args.batch_size)
     pad_id = processor.tokenizer.pad_token_id
     loader = torch.utils.data.DataLoader(
-        _PreparedShardDataset(dataset, processor, shard),
+        _PreparedShardDataset(dataset, processor, shard, annotate_cameras,
+                              prompt_format),
         batch_size=bs, num_workers=args.num_workers, collate_fn=list)
     pbar = tqdm(total=len(shard), desc=f"eval[{args.split}]", unit="sample",
                 disable=not is_main,

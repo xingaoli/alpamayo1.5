@@ -206,9 +206,11 @@ def infer_segment(clip: RDSWaymoClip, t0_us: int, model, processor, args):
     from alpamayo1_5 import helper
 
     sample = clip.build_sample(t0_us)
+    annotate = bool(getattr(model.config, "include_camera_ids", False)
+                    or getattr(model.config, "include_frame_nums", False))
     messages = helper.create_message(
         frames=sample["image_frames"].flatten(0, 1),
-        camera_indices=sample["camera_indices"])
+        camera_indices=sample["camera_indices"] if annotate else None)
     inputs = processor.apply_chat_template(
         messages, tokenize=True, add_generation_prompt=False,
         continue_final_message=True, return_dict=True, return_tensors="pt")
